@@ -233,12 +233,13 @@ Discussion of records proposals:
 1. `using` declaration open issues
 2. Return type of `Range` indexer on array and FX types
 
-# Upcoming meetings
-
 ## Dec 5, 2018
 
-- Tracked nullable states, their correspondance to source and the rules they follow in flow analysis (Neal/Julien)
-- ~~Generating null-check for `parameter!` (Jared, skipped)~~
+[C# Language Design Notes for Dec 5, 2018](LDM-2018-12-05.md)
+
+- Tracked nullable states, their correspondance to source and the rules they follow in flow analysis
+
+# Upcoming meetings
 
 ## Dec 12, 2018
 
