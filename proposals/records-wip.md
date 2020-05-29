@@ -31,11 +31,29 @@ The `attributes` non-terminal will also permit a new contextual attribute, `data
 
 A class (struct) declared with a parameter list or `data` modifier is called a record class (record struct), either of which is a record type.
 
-It is an error to declare a record type without both a parameter list and the `data` modifier.
-
 ## Members of a record type
 
 In addition to the members declared in the class or struct body, a record type has the following additional members:
+
+### Equality members
+
+Record types produce synthesized implementations for the following methods:
+
+* `object.GetHashCode()` override, unless it is sealed or user provided
+* `object.Equals(object)` override, unless it is sealed or user provided
+* `T Equals(T)` method, where `T` is the current type
+
+`T Equals(T)` is specified to perform value equality such that `Equals` is
+true if and only if all the instance fields declared in the receiver type
+are equal to the fields of the other type.
+
+`object.Equals` performs the equivalent of
+
+```C#
+override Equals(object o) => Equals(o as T);
+```
+
+In addition to the above members, records with a parameter list ("positional records" have the following members):
 
 ### Primary Constructor
 
@@ -61,23 +79,6 @@ For a record struct or a record class:
 
   * This property is also `initonly`, meaning the backing field can be modified in the [with](#With) expression below, if the corresponding `get` accessor is accessible
 
-### Equality members
-
-Record types produce synthesized implementations for the following methods:
-
-* `object.GetHashCode()` override, unless it is sealed or user provided
-* `object.Equals(object)` override, unless it is sealed or user provided
-* `T Equals(T)` method, where `T` is the current type
-
-`T Equals(T)` is specified to perform value equality such that `Equals` is
-true if and only if all the instance fields declared in the receiver type
-are equal to the fields of the other type.
-
-`object.Equals` performs the equivalent of
-
-```C#
-override Equals(object o) => Equals(o as T);
-```
 
 ## `with` expression
 
