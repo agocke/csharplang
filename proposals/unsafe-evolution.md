@@ -482,7 +482,6 @@ unsafe public static void Copy(void* source, void* destination, int count) { /* 
 #### Tooling considerations
 
 - An analyzer could warn when an `unsafe` member is missing a `<safety>` doc comment, similar to how existing analyzers warn about missing `<summary>` or `<param>` tags.
-- Documentation generators (e.g., DocFX) could render `<safety>` blocks with distinct visual styling (e.g., a warning callout) to draw attention to safety obligations.
 - IDE tooltips could surface the `<safety>` block prominently when hovering over calls to `unsafe` members, making the obligations visible at the call site without needing to navigate to the declaration.
 
 #### Open questions
