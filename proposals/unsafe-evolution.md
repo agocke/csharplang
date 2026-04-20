@@ -449,6 +449,48 @@ Similarly `void M<T>() where T: C<D>` with above definitions for `C` and `D`.
 Passing an obligation to callers comes with a responsibility to make it clear what that obligation is.
 Should we formalize this beyond what can already be represented in xml docs?
 
+Members marked `unsafe` should have comments indicating what is necessary for the caller to do to ensure the code is correct. To make it easier to see and easier to differentiate in documentation, a new XML doc tag would be helpful: `<safety>`. It would be expected that all pre/post-conditions necessary for memory safety would be placed in a `<safety>` block.
+
+#### Example usage
+
+```cs
+/// <summary>
+/// Reads a value of type <typeparamref name="T"/> from the given location.
+/// </summary>
+/// <safety>
+/// The caller must ensure that <paramref name="source"/> points to a valid,
+/// properly aligned block of memory of at least <c>sizeof(T)</c> bytes.
+/// Reading from an invalid or freed memory location results in undefined behavior.
+/// </safety>
+unsafe public static T Read<T>(void* source) where T : unmanaged { /* ... */ }
+```
+
+```cs
+/// <summary>
+/// Copies <paramref name="count"/> bytes from <paramref name="source"/> to <paramref name="destination"/>.
+/// </summary>
+/// <safety>
+/// <para>Both <paramref name="source"/> and <paramref name="destination"/> must point to valid
+/// memory regions of at least <paramref name="count"/> bytes.</para>
+/// <para>The memory regions may overlap; the copy is performed as if through an intermediate buffer.</para>
+/// <para>Passing null for either pointer, or a <paramref name="count"/> that exceeds the
+/// allocated size, results in undefined behavior.</para>
+/// </safety>
+unsafe public static void Copy(void* source, void* destination, int count) { /* ... */ }
+```
+
+#### Tooling considerations
+
+- An analyzer could warn when an `unsafe` member is missing a `<safety>` doc comment, similar to how existing analyzers warn about missing `<summary>` or `<param>` tags.
+- Documentation generators (e.g., DocFX) could render `<safety>` blocks with distinct visual styling (e.g., a warning callout) to draw attention to safety obligations.
+- IDE tooltips could surface the `<safety>` block prominently when hovering over calls to `unsafe` members, making the obligations visible at the call site without needing to navigate to the declaration.
+
+#### Open questions
+
+- Should `<safety>` be required (produce a warning when absent) for all `unsafe` members, or should it be opt-in via an analyzer?
+- Should the tag support structured sub-elements (e.g., `<precondition>`, `<postcondition>`) or remain free-form text?
+- How should `<safety>` interact with `<inheritdoc />`? If a derived class overrides an `unsafe` method, should it inherit the safety documentation, require its own, or both?
+
 ### More meaningless `unsafe` warnings
 
 Should more declarations produce the meaningless `unsafe` warning?
@@ -645,10 +687,6 @@ We could limit this break by introducing a new keyword for when the caller of a 
 
 For nullable, we force generator authors to explicitly opt-in to nullable regardless of whether the entire project has opted into the feature by default, so that generator output isn't broken by the user
 turning on nullable and warn as error. Should we do the same for source generators?
-
-### XML doc comments
-
-Members marked `unsafe` should have comments indicating what is necessary for the caller to do to ensure the code is correct. To make it easier to see and easier to differentiate in documentation, a new XML doc tag would be helpful: `<safety />`. It would be expected that all pre/post-conditions would be placed in `<safety>` block. 
 
 </details>
 
