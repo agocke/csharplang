@@ -130,9 +130,14 @@ readonly struct ReadOnlyBorrow<T>(T value) where T : class
 
 Note that there is a mutable and read-only version of the `Borrow` type. These are analogous to `ref` and `ref readonly` and serve similar purposes. They fall into the same aliasing restrictions above: there may be either one mutable borrowed reference or any number of read-only borrows, but they are mutually exclusive.
 
+Also note that the Borrow types are intrinsic -- they can violate some other rules, like substitution of resource types for generics. It is also illegal to copy `Borrow<T>`, as this would create multiple mutable references.
+
 The `Value` property will be illegal to access by all code except the compiler. Note that all instance methods of resource types consider their receiver borrowed, so this includes all instance members. In fact, the compiler is responsible for analyzing all operations on `Borrow<T>` as if they were operations on `T` and automatically translating them through calls to `Value`.
 
 > **N.B.** All instance members have a borrowed receiver.
+
+TBD:
+- [ ] subtyping rules, analogous to rules for by-refs
 
 #### Borrow lifetimes
 
@@ -173,7 +178,7 @@ Quite simply, ref structs are parameterized by N lifetime variables for N by-ref
 ```csharp
 struct E<$a>
 {
-    public Borrow<$a, int> Value;
+    public Borrow<$a, string> Value;
 }
 ```
 
@@ -209,6 +214,11 @@ void M2<$a>(Borrow<$a, C> b)
 ```
 
 We can see that the lifetime parameterization of `Borrow<C>` is based on the assignment of the `c` variable. We will, however, note that the lifetime is based on the ownership of `c` — not the storage. So even though the data of `C` lives on the heap, the ownership lifetime is bound to the lexical lifetime of `c`, namely the body of the method `M`.
+
+### Mutability
+
+- TBD
+
 
 ### Worked examples
 
