@@ -266,12 +266,14 @@ This may seem simple, but it is effective. This is enough to verify that all fil
 Next we have `ArrayPool`. This is more complicated because the restriction is stricter, and we are more likely to need to interact with code we don't own. One possible new API shape is as follows.
 
 ```csharp
-class ArrayPool // unowned
+class ArrayPool<T> // unowned
 {
+    public static ArrayPool<T> Shared { get; } = new ArrayPool<T>();
+
     public RentedArray Rent(int size)
     {
         // acquire normal array from the pool
-        return new RentedArray(array);
+        return new RentedArray(array, this);
     }
 
     private void Return(T[] array) // Note: private
@@ -279,18 +281,17 @@ class ArrayPool // unowned
         // return array to pool
     }
 
-    public readonly struct RentedArray<T> : IResource
+    public readonly struct RentedArray : IResource
     {
         private readonly T[] _rented;
-        private readonly ArrayPool _pool;
+        private readonly ArrayPool<T> _pool;
 
-        internal RentedArray(T[] rented, ArrayPool pool)
+        internal RentedArray(T[] rented, ArrayPool<T> pool)
         {
             _rented = rented;
             _pool = pool;
         }
 
-        [UnscopedRef]
         public Span<T> Span => _rented;
 
         void IResource.Drop()
@@ -301,9 +302,11 @@ class ArrayPool // unowned
 }
 ```
 
-The way the new `ArrayPool` API works is through returning a new `RentedArray` type. This type is not an array, nor does it provide access to an array, but it does provide a `Span`. This `Span` is not owned — like all `Span` types, it is _borrowed_ from the real owner. However, this is usable in many scenarios that currently use an array. The `Span` safety rules attach to the `Span` itself. However, creating a span from an array would normally produce a `Span` with a heap lifetime. The interesting addition is the enablement of `UnscopedRef`. This attribute isn't currently legal in this location. But as it is proposed, `UnscopedRef` attaches the lifetime of the containing `IResource` to the `Span`/borrow. This is a property of the containing type being a struct.
+The way the new `ArrayPool<T>` API works is through returning a new `RentedArray` type, nested in `ArrayPool<T>` so that it shares the same `T` and can call the pool's `private` `Return` method. This type is not an array, nor does it provide access to an array, but it does provide a `Span`. This `Span` is not owned — like all `Span` types, it is _borrowed_ from the real owner. However, this is usable in many scenarios that currently use an array. The `Span` safety rules attach to the `Span` itself. However, creating a span from an array would normally produce a `Span` with a heap lifetime, and that is *not* what we want here: the `Span` must not be allowed to outlive the `RentedArray` that owns it, or code could observe (or write into) the underlying array after it has been returned to the pool.
 
-The usage would like:
+This is exactly the kind of restriction `[UnscopedRef]` cannot express — `UnscopedRef` widens the allowed lifetime of a `ref` so that it can escape the enclosing method, which is the opposite of what we need. What we actually want is for the compiler to tie the lifetime of the returned `Span<T>` to the borrow of `this` used to call the `Span` property, so the result cannot outlive the `RentedArray` instance it came from. Ordinary instance member access already produces a borrow of the receiver (see above), so as long as `Span` is treated like any other borrowing member — with no attribute widening its result's lifetime — the existing borrow-checking rules should ensure the `Span` cannot escape the lifetime of its `RentedArray`. Making this precise requires the borrow/escape-analysis rules described earlier in this proposal to be filled in; until then, this should be read as a statement of intent rather than as something expressible with today's C# syntax.
+
+The usage would look like:
 
 ```csharp
 void Write(string s)
@@ -314,13 +317,12 @@ void Write(string s)
 
     if (utf8.Length == 0)
     {
-        var rented = OwnedArrayPool.Rent(s.Length * 2);
-        var span = rented.Span;
-        ToUtf8(s, span);
+        var rented = ArrayPool<byte>.Shared.Rent(s.Length * 2);
+        ToUtf8(s, rented.Span);
     }
     else
     {
-        ToUtf8(s, span);
+        ToUtf8(s, utf8);
     }
 }
 ```
