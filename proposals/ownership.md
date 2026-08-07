@@ -52,7 +52,7 @@ interface IResource
 }
 ```
 
-Any type that implements `IResource` will be considered an owned resource, which carries some special requirements and privileges. Types will not have to provide an implementation for `Drop()`; the language will automatically provide an implementation that calls `Drop` on all fields that implement `IResource`, in field declaration order. If a type does provide an implementation of `Drop`, that is _in addition to_ the default implementation — before a user implementation of `Drop` is run, the language defined transitive `Drop` implementation is run. This ensures that resources cannot accidentally forget to be dropped.
+Any type that implements `IResource` will be considered an owned resource, which carries some special requirements and privileges. Types will not have to provide an implementation for `Drop()`; the language will automatically provide an implementation that calls `Drop` on all fields that implement `IResource`, in field declaration order. If a type does provide an implementation of `Drop`, that is _in addition to_ the default implementation — after a user implementation of `Drop` is run, the language defined transitive `Drop` implementation is run. This ensures that resources cannot accidentally forget to be dropped.
 
 The following rules apply to all resource types `R`:
 
@@ -66,6 +66,7 @@ The following rules apply to all resource types `R`:
       - After transfer, use of the original reference is disallowed.
   - There may be only one mutable reference, or any number of read-only references (aliasing rules).
   - `R` may not be substituted for generic type parameters
+  - `R` may not be boxed into `object`, an interface, `dynamic`, or captured inside a delegate.
 
 Let's look at a few examples:
 
@@ -105,6 +106,14 @@ local.M();
 
 In the above, `local.M();` is an error. `r2 = local` did not make a copy or create a new alias — it took ownership of the value, and `local` lost it.
 
+### Drop rules
+
+- `Drop()` is compiler-invoked and cannot be called directly.
+- `Drop` is invoked when leaving the variable's lexical declaring scope
+    - This includes exception unwinding
+- When an owning variable is re-assigned, `Drop` is called on the overwritten value
+- Drop implementations should not throw
+
 ### Borrowing references
 
 Now that we've covered owning references we need to outline borrowed references. Borrowing is very important because it makes helper functions and modularity possible. Consider a generic `ReadByte` function that operates on a `File` type. If `ReadByte` were forced to take ownership of the `File`, `ReadByte` could only be called a single time on a given reference — very inconvenient for files more than one byte long.
@@ -130,7 +139,7 @@ readonly struct ReadOnlyBorrow<T>(T value) where T : class
 
 Note that there is a mutable and read-only version of the `Borrow` type. These are analogous to `ref` and `ref readonly` and serve similar purposes. They fall into the same aliasing restrictions above: there may be either one mutable borrowed reference or any number of read-only borrows, but they are mutually exclusive.
 
-Also note that the Borrow types are intrinsic -- they can violate some other rules, like substitution of resource types for generics. It is also illegal to copy `Borrow<T>`, as this would create multiple mutable references.
+Also note that the Borrow types are intrinsic -- they can violate some other rules, like substitution of resource types for generics. It is also illegal to copy `Borrow<T>`, as this would create multiple mutable references. In addition, the owner cannot be used, moved, or dropped while borrowed.
 
 The `Value` property will be illegal to access by all code except the compiler. Note that all instance methods of resource types consider their receiver borrowed, so this includes all instance members. In fact, the compiler is responsible for analyzing all operations on `Borrow<T>` as if they were operations on `T` and automatically translating them through calls to `Value`.
 
@@ -217,7 +226,15 @@ We can see that the lifetime parameterization of `Borrow<C>` is based on the ass
 
 ### Mutability
 
-- TBD
+At any point, a resource value permits either:
+
+- one mutable borrow, or
+- any number of read-only borrows.
+
+These states are mutually exclusive. While any borrow is live, the owner
+may not be accessed, transferred, reassigned, or dropped.
+
+To accommodate read-only and mutable borrows we also have to adjust the rules for classes themselves. The `readonly` keyword will now be legal for class methods, just like struct methods. It will have the same rules. An ordinary (non-readonly) class instance method will have a `Borrow<this>` receiver. A `readonly` instance member has a `ReadOnlyBorrow<this>` receiver. Importantly, read-only borrows may only call readonly members. Note that this is shallow mutability -- non-resource members may effectively be mutated due to lack of mutability requirements on interior members.
 
 
 ### Worked examples
@@ -230,7 +247,7 @@ We now have the fundamental building blocks of our ownership system. To that end
 
 Let's examine each in order.
 
-For finite native resources, `File` is a good example. Ignoring that a `File` type already exists, we could define another:
+For finite native resources, `File` is a good example. We can reliably close the file inside Drop, preventing leaking file handles or duplicate close. Note that for a real File, we may have buffered I/O that needs to be written -- because Drop is not `async` we cannot guarantee that all data is written, just that the file is closed.
 
 ```csharp
 class File : IResource
