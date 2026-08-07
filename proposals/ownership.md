@@ -64,7 +64,8 @@ The following rules apply to all resource types `R`:
     - Assigning an owning reference to another owning reference is considered a transfer of ownership.
       - If the variable may be assigned before another assignment, assigning it ends its lifetime
       - After transfer, use of the original reference is disallowed.
-  - Substitution of `R` into type parameters is restricted — more details later.
+  - There may be only one mutable reference, or any number of read-only references (aliasing rules).
+  - `R` may not be substituted for generic type parameters
 
 Let's look at a few examples:
 
@@ -114,22 +115,28 @@ Lastly, it is important to note that borrowed references are truly references to
 
 For classes, the opposite is true. A by-ref to a class variable produces a reference to the local variable. Borrowed references are aliases of the owned value, not the owning reference. This means that all class borrowed references are regular variables with no special ref kind. However, they are different from regular references.
 
-To represent borrowed class references, a new special type, `Borrowed`, will be added to the core library. The definition is as follows:
+To represent borrowed class references, two new special types will be added to the core library. The definition is as follows:
 
 ```csharp
-readonly struct Borrowed<T>(T value) where T : class
+struct Borrow<T>(T value) where T : class
+{
+    public T Value { get; set; } = value;
+}
+readonly struct ReadOnlyBorrow<T>(T value) where T : class
 {
     public T Value { get; } = value;
 }
 ```
 
-The `Value` property will be illegal to access by all code except the compiler. Note that all instance methods of resource types consider their receiver borrowed, so this includes all instance members. In fact, the compiler is responsible for analyzing all operations on `Borrowed<T>` as if they were operations on `T` and automatically translating them through calls to `Value`.
+Note that there is a mutable and read-only version of the `Borrow` type. These are analogous to `ref` and `ref readonly` and serve similar purposes. They fall into the same aliasing restrictions above: there may be either one mutable borrowed reference or any number of read-only borrows, but they are mutually exclusive.
+
+The `Value` property will be illegal to access by all code except the compiler. Note that all instance methods of resource types consider their receiver borrowed, so this includes all instance members. In fact, the compiler is responsible for analyzing all operations on `Borrow<T>` as if they were operations on `T` and automatically translating them through calls to `Value`.
 
 > **N.B.** All instance members have a borrowed receiver.
 
 #### Borrow lifetimes
 
-Unlike owned values, borrowed values have a special restriction: they can't live longer than their parent value. This rule is enforced by the language through static analysis. Luckily, the language already has a concept of lifetimes and a lifetime analysis system for by-ref types. Fortunately, we can adopt this system almost unmodified. The formalization of the lifetime system includes polymorphic lifetime variables — and in particular the formalization includes a definition of by-ref variables as `ByRef<$a, T>` where `$a` is the lifetime parameter. This lifetime variable is most relevant for our purposes. We want this lifetime to capture the ownership lifetime of the target, not its storage lifetime. Fortunately, these are compatible — the storage lifetime is always <u>at least as long as</u> the ownership lifetime. This is because ownership may shorten a variable's lifetime by transferring away ownership, but it may not extend it. Thus we may treat ownership and storage lifetimes as unified into a single lifetime concept and simply add a new unification rule: when two lifetimes are combined, storage or ownership, the resulting lifetime is the shorter of the two. Or, in type theory terms, it is the widest of the two lifetime types.
+Unlike owned values, borrowed values have a special restriction: they can't live longer than their parent value. This rule is enforced by the language through static analysis. Luckily, the language already has a concept of lifetimes and a lifetime analysis system for by-ref types. We can adopt this system almost unmodified. The [formalization of the lifetime system](https://github.com/dotnet/csharplang/pull/9418) includes polymorphic lifetime variables — and in particular the formalization includes a definition of by-ref variables as `ByRef<$a, T>` where `$a` is the lifetime parameter. This lifetime variable is most relevant for our purposes. We want this lifetime to capture the ownership lifetime of the target, not its storage lifetime. Fortunately, these are compatible — the storage lifetime is always <u>at least as long as</u> the ownership lifetime. This is because ownership may shorten a variable's lifetime by transferring away ownership, but it may not extend it. Thus we may treat ownership and storage lifetimes as unified into a single lifetime concept and simply add a new unification rule: when two lifetimes are combined, storage or ownership, the resulting lifetime is the shorter of the two. Or, in type theory terms, it is the widest of the two lifetime types.
 
 For by-ref variables, we do not need to make any further modifications. By-ref variables already carry a lifetime variable and will continue to do so in the same way — the lifetime will now also track ownership lifetime. The most important change is that we now have a new type of ref — the `Borrow<T>` type. Remember the ownership constraint — a `Borrow<T>` instance may not live longer than its target. To do so, `Borrow` must be instantiated with the lifetime of its target. Therefore, the full formal definition of `Borrow` must include a lifetime parameter, just like by-ref. Therefore the full formal definition is
 
