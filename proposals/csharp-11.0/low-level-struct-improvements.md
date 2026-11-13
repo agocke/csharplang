@@ -927,32 +927,35 @@ ref struct S<T>
 }
 ```
 
-### Annotations
-Lifetimes are most naturally expressed using types: a program's lifetimes are safe when its lifetime types type check. C# syntax adds lifetimes to values implicitly, but there is an underlying type system that describes the fundamental rules. It's often easier to discuss changes to the design in terms of that type system, so it is described here.
+## Formal model
+<a name="annotations"></a>
 
-This is not meant to document every behavior. The goal is to establish a common understanding and vocabulary for discussing the model and potential changes to it.
+The rules in this proposal are written in terms of *safe-context* and *ref-safe-context*, which is how the compiler computes them. Underneath them is a claim that can be stated more simply: a `ref` never outlives the location it refers to. This section describes the design as two layers that separate that claim from everything else.
 
-Usually there's no need to talk about lifetime types directly. The exception is where lifetimes vary based on the particular "instantiation" site. This is a kind of polymorphism, and we call these varying lifetimes *generic lifetimes*, represented as generic parameters. C# has no syntax for generic lifetimes, so this section defines a translation from C# to a lowered language in which they are explicit.
+1. A **type system** in which lifetimes are explicit. A program that type checks in it is safe. This is the only layer that safety depends on.
+2. **Inference** that maps C# source, which has no syntax for lifetimes, onto that type system. It has two parts. The *signature translation* gives every type and member declaration its lifetimes from its syntax alone. *Body inference* chooses lifetimes for the locals and calls inside a method.
 
-#### Named lifetimes
+Inference only produces programs for the type system to check, so it cannot make an unsafe program type check. Its choices decide which safe programs are accepted and where errors are reported. The rules elsewhere in this proposal can then be read as consequences of the two layers, and [derived rules](#derived-rules) lists them.
+
+This section is not a complete formalization, and its correspondence with the rules as the compiler implements them has not been proven. It is meant to establish a common understanding and vocabulary for discussing the design and potential changes to it.
+
+### Type system
+
+#### Lifetimes
 
 The syntax `$a` refers to a lifetime named `a`. A named lifetime has no meaning by itself, but it can be related to other lifetimes with a `where $a : $b` constraint. This establishes that `$a` is convertible to `$b`, which can be thought of as `$a` lasting at least as long as `$b`.
 
-Two lifetimes are predefined and always in scope. They are the longest and shortest lifetimes a method can name:
+Lifetimes come from three places:
 
-- `$heap`: the lifetime of any value on the heap. It is convertible to every lifetime: `where $heap : $a` for every `$a`.
-- `$local`: the lifetime of any value on the method stack, *function-member*. Every lifetime a method can name is convertible to it: `where $a : $local` for every `$a`. A lifetime that the caller supplies always lasts at least as long as the stack of the method it calls. `$local` can appear in method signatures, but not in any output position.
+- `$heap` is the lifetime of any value on the heap. It is convertible to every lifetime: `where $heap : $a` for every `$a`.
+- Every block in a method body has a lifetime, which is the lifetime of the locals declared in it. The lifetime of a block is convertible to the lifetime of every block nested inside it. `$local` is the lifetime of the outermost block of the current method, *function-member*. The samples use `$local` for every local unless the nesting matters.
+- Every other lifetime is a generic parameter of a method or type. Lifetime parameters are written before any type parameters, for example `M<$ro, $cm>`.
 
-Every other lifetime is a generic parameter of the method or type that uses it. Two names are used by convention for the lifetime parameters that the translation adds to methods:
-
-- `$ro`: *return-only*
-- `$cm`: *caller-context*
-
-A method that declares both has the implicit constraint `where $cm : $ro`. It is left off the samples below for brevity.
+Every lifetime parameter that a method can name is convertible to `$local`. A lifetime that the caller supplies always lasts at least as long as the call. `$local` can appear in a method signature, but not in any output position.
 
 #### Values, locations and refs
 
-Lifetimes are written as generic arguments, before any type arguments, for example `M<$ro, $cm>`. A type does not have a lifetime of its own. Two things do:
+A type does not have a lifetime of its own. Two things do:
 
 - A *value* of a `ref struct` type has a lifetime that limits where the value can flow. This is its *safe-context*, and it is written as the lifetime argument of the type: `S<$a>`. A type parameter that `allows ref struct` is treated the same way. Every other type has no lifetime argument, because its values cannot contain a `ref`: an `int` can be copied anywhere.
 - A *location* has a lifetime that limits how long a `ref` to it is valid. This is its *ref-safe-context*. Taking a `ref` to a location whose lifetime is `$a` produces a `ref<$a> T`. For example, a `ref` to an array element is a `ref<$heap> T`.
@@ -964,15 +967,12 @@ The lifetime of a location is:
 | Location | Lifetime |
 | --- | --- |
 | An array element, a `static` field, or a field `e.F` where `e` is of a reference type | `$heap` |
-| A local or a value parameter | `$local` |
+| A local | The lifetime of the block that declares it |
+| A value parameter | `$local` |
 | The target of a `ref` local, parameter, field or return of type `ref<$a> T` | `$a` |
 | A field `e.F` where `e` is of a struct type | The lifetime of the location `e` |
 
-A `ref` field needs no rule of its own. Its type is `ref<$this> T`, so its target falls under the third row and has the `$this` lifetime of `e`.
-
-Using `$local` for every local is an approximation. A local declared in a nested block has a shorter lifetime than one declared in an enclosing block, and the language tracks the difference. The model ignores it because it does not affect method signatures.
-
-The lifetime of a location says nothing about the lifetime of a `ref struct` value stored in it. For a local, the value lifetime is inferred from its initializer, or is `$local` when the local is declared `scoped`.
+A `ref` field needs no rule of its own. Its type is `ref<$this> T`, so its target falls under the fourth row and has the `$this` lifetime of `e`.
 
 The samples make the lifetimes of an expression explicit by annotating it, for example `ref<$heap> array[0]` or `default(S<$heap>)`.
 
@@ -1038,9 +1038,35 @@ A `ref struct` is an aggregate of its fields, so the variance of its lifetime pa
 
 #### Methods
 
-The C# method syntax maps to the model as follows:
+A method declares lifetime parameters and constraints between them. Inside the method an assignment, a `return` or an argument is legal when the conversion between the lifetime types is legal.
 
-- `ref` parameters have a ref lifetime of `$ro`.
+A call supplies a lifetime for each lifetime parameter of the method. Every argument must convert to the type of its parameter once those lifetimes are filled in, and the result of the call has the return type with the same lifetimes filled in.
+
+One signature can stand in for another, as in an override, an interface implementation or a delegate conversion, when it accepts every argument the other accepts and returns only what the other can return. Parameter types are contravariant and the return type is covariant.
+
+#### Safety
+
+A location is live for at least as long as its lifetime. The property that the type system is meant to guarantee is:
+
+> In a program that type checks, whenever a `ref<$a> T` is read or written the location it refers to is still live. The same holds for every `ref` contained in a value of type `S<$a>`.
+
+The argument has the following shape. It is a sketch, not a proof, and it does not cover `unsafe` code.
+
+- A `ref` is created with the lifetime of its location, by the table above.
+- A conversion can shorten the lifetime of a `ref` but never lengthen it, because that lifetime is covariant.
+- A conversion cannot change the lifetime of anything behind a pointer, because that position is invariant. A location therefore never holds a value that lasts for less time than some view of the location claims.
+- A value cannot be stored in a location that outlives it, because the value must last at least as long as the location.
+- A value leaves a method only through its return or through a `ref` or `out` parameter. The types of those name only lifetimes the caller supplied, and `$local` cannot appear in them, so nothing that refers to the stack of the method can leave it.
+
+### Signature translation
+
+The lifetimes of a declaration are fixed by its syntax alone. They never depend on the body of a method, so a caller can be checked against a signature without seeing the implementation.
+
+A `ref struct` declaration is given the lifetime parameter `out $this`, with every `ref` field typed `ref<$this> T` and every field of `ref struct` type typed `T<$this>`.
+
+A method is given two lifetime parameters, named `$ro` for *return-only* and `$cm` for *caller-context*, with the constraint `where $cm : $ro`. The constraint is left off the samples for brevity. The parameters and return of the method are then typed as follows:
+
+- `ref` and `in` parameters have a ref lifetime of `$ro`.
 - Parameters of `ref struct` type have a value lifetime of `$cm`.
 - `ref` returns have a ref lifetime of `$ro`.
 - Returns of `ref struct` type have a value lifetime of `$ro`.
@@ -1048,16 +1074,7 @@ The C# method syntax maps to the model as follows:
 - `out` parameters are implicitly `scoped`, and as an output of the method a `ref struct` value has a value lifetime of `$ro`: `out S s` maps to `ref<$local> S<$ro> s`.
 - `[UnscopedRef]` removes an implicit `scoped`. On a `ref` parameter, which has none, it raises the ref lifetime from `$ro` to `$cm`.
 
-A call instantiates the lifetime parameters of the method. Every argument must convert to the type of its parameter, and the caller picks the longest lifetimes for which they all do:
-
-- `$cm` can be no longer than the value lifetime of any `ref struct` argument, because `S<$a>` converts to `S<$cm>` only when `$a` converts to `$cm`.
-- `$ro` can be no longer than `$cm`, or than the ref lifetime of any `ref` argument.
-- An argument to a `scoped` parameter adds no constraint. Every lifetime in the caller converts to the `$local` of the method being called.
-- A `ref struct` argument passed by `ref` sits behind a pointer, which is an invariant position, so its value lifetime must be exactly `$cm`. An `out` argument is only written, so `$ro` must convert to its value lifetime. An `in` argument adds no such constraint, as described in [lifetime variance](#lifetime-variance).
-
-The result of the call has the type that the signature gives once those lifetimes are filled in, so a returned `ref` or `ref struct` has the chosen `$ro`. This is the model's form of the [rules for method invocation](#rules-method-invocation): the result is limited by the narrowest argument that contributes, and arguments to `scoped` parameters do not contribute. A call for which no choice satisfies the last bullet is an error, which is [method arguments must match](#rules-method-arguments-must-match).
-
-Instance methods and constructors need no rules of their own. Both are modeled as `static` methods with an explicit `this` parameter, and the mapping above gives its type:
+Instance methods and constructors need no rules of their own. Both are translated to `static` methods with an explicit `this` parameter, and the list above gives its type:
 
 - In an instance method of a `struct`, `this` is an implicitly `scoped` `ref` parameter: `ref<$local> S<$cm> this`. With `[UnscopedRef]` it is `ref<$ro> S<$cm> this`.
 - In a constructor, `this` is an `out` parameter, as described in [modeling constructors](#modeling-constructors): `ref<$local> S<$ro> this`. A `new` expression is annotated with the type of the value that the constructor produces, for example `new S<$heap>(...)`.
@@ -1078,7 +1095,46 @@ ref struct S<out $this>
 }
 ```
 
-#### Examples
+The translation is a choice of defaults, and safety does not depend on it. For example, a translation with a single lifetime parameter, where `ref` parameters and `ref struct` parameters both use `$cm`, is also safe. With it a method can store a `ref` parameter into a `ref struct` parameter, so every call that passes a `ref` to a local alongside a `ref struct` that lasts longer has to be an error. Giving `ref` parameters the shorter lifetime `$ro` makes the store an error inside the one method that attempts it and keeps those calls legal. That is the purpose of the *return-only* context.
+
+### Body inference
+
+Inside a method the lifetimes that the source does not state are chosen as follows. When no choice type checks, the program is in error.
+
+**Locals.** The location of a local has the lifetime of the block that declares it. The ref lifetime of a `ref` local and the value lifetime of a local of `ref struct` type are taken from the initializer. A `scoped` local uses the lifetime of its block instead.
+
+**Calls.** The caller picks the longest lifetimes for which every argument converts to the type of its parameter:
+
+- `$cm` can be no longer than the value lifetime of any `ref struct` argument, because `S<$a>` converts to `S<$cm>` only when `$a` converts to `$cm`.
+- `$ro` can be no longer than `$cm`, or than the ref lifetime of any `ref` argument.
+- An argument to a `scoped` parameter adds no constraint. Every lifetime in the caller converts to the `$local` of the method being called.
+- A `ref struct` argument passed by `ref` sits behind a pointer, which is an invariant position, so its value lifetime must be exactly `$cm`. An `out` argument is only written, so `$ro` must convert to its value lifetime. An `in` argument adds no such constraint, as described in [lifetime variance](#lifetime-variance).
+
+The result of the call has the return type with those lifetimes filled in, so a returned `ref` or `ref struct` has the chosen `$ro`. A variable declared by an `out` argument, as in `M(out var x)`, has a value lifetime of the chosen `$ro`.
+
+**Object initializers.** A member initializer that assigns to the object being created is treated as an additional argument to the constructor.
+
+### Derived rules
+
+The rules in the rest of this proposal follow from the layers above. This table gives the reason for each one informally. 
+
+| Rule | Follows from |
+| --- | --- |
+| [Field lifetimes](#rules-field-lifetimes) | The table of location lifetimes. A `ref` field is typed `ref<$this> T`, so its target has the value lifetime of the containing expression. |
+| [Ref reassignment](#rules-ref-reassignment), rule 1 | The lifetime of a `ref` is covariant. |
+| [Ref reassignment](#rules-ref-reassignment), rule 2 | The type behind a pointer is invariant. |
+| [`scoped`](#rules-scoped) | The translation to `$local`, which cannot appear in an output position and is not convertible to any lifetime parameter. |
+| [`out` parameters](#out-compat-change) | The translation of `out S s` to `ref<$local> S<$ro> s`. The argument is only written, so its previous value adds no constraint to the call. |
+| [Return-only](#return-only) | The translation gives a method both `$ro` and `$cm` with `where $cm : $ro`. A returned expression must convert to the return type, which uses `$ro`. |
+| [Method invocation](#rules-method-invocation) | Body inference picks the longest lifetimes for a call, so the result is limited by the narrowest argument that contributes. |
+| [Declaration expressions](#infer-safe-to-escape-of-declaration-expressions) | A variable declared by an `out` argument receives a value of type `S<$ro>`. |
+| Object initializers | Member initializers are constructor arguments. |
+| [Method arguments must match](#rules-method-arguments-must-match) | A `ref struct` passed by `ref` is in an invariant position. The call is an error when no choice of `$cm` matches every such argument. |
+| [Parameter scope variance](#scoped-mismatch) | Parameter types are contravariant. Adding `scoped` replaces a lifetime with `$local`, to which every lifetime converts, so the new signature accepts every argument the old one did. |
+| [`[UnscopedRef]`](#rules-unscoped) | The translation: it removes an implicit `scoped`, or raises `$ro` to `$cm`. |
+| [Cyclic assignment](#cyclic-assignment) and capturing a `ref` parameter | `$ro` is not convertible to `$cm`. See the examples below. |
+
+### Examples
 
 A method that returns a `ref` parameter:
 
@@ -1463,7 +1519,7 @@ This *ref-field-safe-context* has essentially always existed. Up until now `ref`
 
 Third the rules for ref reassignment need to be updated to ensure that we don't violate *ref-field-context* for the values. Essentially for `x.e1 = ref e2` where the type of `e1` is a `ref struct` the *ref-field-safe-context* must be equal. 
 
-Fourth, the [annotation model](#annotations) needs to expand. Today every `ref struct` has the single lifetime parameter `out $this`. A `ref` field to a `ref struct` needs two lifetimes: one for the `ref` and one for the referenced value, which corresponds to the *ref-field-safe-context*. Types would then declare several lifetime parameters, and two rules keep those declarations sound:
+Fourth, the [formal model](#formal-model) needs to expand. Today every `ref struct` has the single lifetime parameter `out $this`. A `ref` field to a `ref struct` needs two lifetimes: one for the `ref` and one for the referenced value, which corresponds to the *ref-field-safe-context*. Types would then declare several lifetime parameters, and two rules keep those declarations sound:
 
 - Every lifetime used in a field must be convertible to `$this`. This is the same containment rule that applies to `ref<$a> T<$b>`.
 - The declared variance of each lifetime parameter must be valid for every position in which the fields use it. This is the check C# already performs for `in` and `out` type parameters on interfaces and delegates, using the positions described in [lifetime variance](#lifetime-variance).
