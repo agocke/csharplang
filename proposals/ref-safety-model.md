@@ -2,10 +2,10 @@
 
 The ref safety rules of C# are specified in [span safety](csharp-7.2/span-safety.md) and [low level struct improvements](csharp-11.0/low-level-struct-improvements.md). They are written in terms of *safe-context* and *ref-safe-context*, which is how the compiler computes them. Underneath them is a claim that can be stated more simply: a `ref` never outlives the location it refers to. This document describes the design as two layers that separate that claim from everything else.
 
-1. A **type system** in which lifetimes are explicit. A program that type checks in it is safe. This is the only layer that safety depends on.
+1. A **type system** in which lifetimes are explicit. The claim is that a program that type checks in it is safe. This is the only layer that safety depends on.
 2. **Inference** that maps C# source, which has no syntax for lifetimes, onto that type system. It has two parts. The *signature translation* gives every type and member declaration its lifetimes from its syntax alone. *Body inference* chooses lifetimes for the locals and calls inside a method.
 
-Inference only produces programs for the type system to check, so it cannot make an unsafe program type check. Its choices decide which safe programs are accepted and where errors are reported. The rules in those proposals can then be read as consequences of the two layers, and [derived rules](#derived-rules) lists them.
+Inference only produces programs for the type system to check, so if the claim holds, inference cannot make an unsafe program type check. Its choices decide which safe programs are accepted and where errors are reported. The rules in those proposals can then be read as consequences of the two layers, and [derived rules](#derived-rules) lists them.
 
 This document is not a complete formalization, and its correspondence with the rules as the compiler implements them has not been proven. It is meant to establish a common understanding and vocabulary for discussing the design and potential changes to it.
 
@@ -13,36 +13,43 @@ This document is not a complete formalization, and its correspondence with the r
 
 ### Lifetimes
 
-The syntax `$a` refers to a lifetime named `a`. A named lifetime has no meaning by itself, but it can be related to other lifetimes with a `where $a : $b` constraint. This establishes that `$a` is convertible to `$b`, which can be thought of as `$a` lasting at least as long as `$b`.
+A lifetime is a span of the program's execution, and the syntax `$a` refers to a lifetime named `a`. The lifetime `$a` is convertible to `$b`, written `$a : $b`, when `$a` lasts at least as long as `$b`. Every lifetime is convertible to itself, and if `$a : $b` and `$b : $c` then `$a : $c`.
 
 Lifetimes come from three places:
 
-- `$heap` is the lifetime of any value on the heap. It is convertible to every lifetime: `where $heap : $a` for every `$a`.
-- Every block in a method body has a lifetime, which is the lifetime of the locals declared in it. The lifetime of a block is convertible to the lifetime of every block nested inside it. `$local` is the lifetime of the outermost block of the current method, *function-member*. The samples use `$local` for every local unless the nesting matters.
-- Every other lifetime is a generic parameter of a method or type. Lifetime parameters are written before any type parameters, for example `M<$ro, $cm>`.
+- `$heap` is the whole execution of the program. It is the lifetime given to every location on the heap, because the garbage collector keeps such a location alive for as long as anything refers to it. It is convertible to every lifetime: `$heap : $a` for every `$a`.
+- Every block in a method body has a lifetime, which is the lifetime of the locals declared in it. It is one execution of the block: each call of the method, and each iteration of a loop, is a separate lifetime that the type system refers to by the same name. The lifetime of a block is convertible to the lifetime of every block nested inside it. `$local` is the lifetime of the outermost block of the current method, *function-member*. The samples use `$local` for every local unless the nesting matters.
+- Every other lifetime is a generic parameter of a method or type. Lifetime parameters are written before any type parameters, for example `M<$ro, $cm>`. A lifetime parameter stands for whatever lifetime the caller supplies. Inside the declaration nothing is known about it except its `where $a : $b` constraints and the rule below.
 
-Every lifetime parameter that a method can name is convertible to `$local`. A lifetime that the caller supplies always lasts at least as long as the call. `$local` can appear in a method signature, but not in any output position.
+Every lifetime parameter that a method can name is convertible to `$local`. A lifetime that the caller supplies always lasts at least as long as the call. `$local` can appear in a method signature, but not in an output position: the return type, or the type of the target of a `ref` or `out` parameter. In a signature it means the `$local` of the method being declared, which a caller has no name for.
 
-### Values, locations and refs
+### Locations and types
 
-A type does not have a lifetime of its own. Two things do:
-
-- A *value* of a `ref struct` type has a lifetime that limits where the value can flow. This is its *safe-context*, and it is written as the lifetime argument of the type: `S<$a>`. A type parameter that `allows ref struct` is treated the same way. Every other type has no lifetime argument, because its values cannot contain a `ref`: an `int` can be copied anywhere.
-- A *location* has a lifetime that limits how long a `ref` to it is valid. This is its *ref-safe-context*. Taking a `ref` to a location whose lifetime is `$a` produces a `ref<$a> T`. For example, a `ref` to an array element is a `ref<$heap> T`.
-
-The two are independent, with one rule connecting them: a value must last at least as long as the location that holds it. In `ref<$a> T<$b>`, `$b` must be convertible to `$a`.
-
-The lifetime of a location is:
+Only locations have lifetimes. A location is a piece of storage, and its lifetime is the span during which that storage exists. It is determined by where the location is:
 
 | Location | Lifetime |
 | --- | --- |
 | An array element, a `static` field, or a field `e.F` where `e` is of a reference type | `$heap` |
 | A local | The lifetime of the block that declares it |
 | A value parameter | `$local` |
-| The target of a `ref` local, parameter, field or return of type `ref<$a> T` | `$a` |
+| A temporary that holds the value of an expression | The lifetime of the block that contains the expression |
 | A field `e.F` where `e` is of a struct type | The lifetime of the location `e` |
 
-A `ref` field needs no rule of its own. Its type is `ref<$this> T`, so its target falls under the fourth row and has the `$this` lifetime of `e`.
+Values and types do not have lifetimes. A type whose values can refer to locations instead takes a lifetime *argument*, which is a lower bound on the lifetimes of those locations:
+
+- `ref<$a> T` is the type of a `ref` to a location that is live for at least `$a`. Taking a `ref` to a location whose lifetime is `$a` produces a `ref<$a> T`. For example, a `ref` to an array element is a `ref<$heap> T`.
+- `S<$a>`, where `S` is a `ref struct`, is the type of a value in which every `ref` is to a location that is live for at least `$a`. A type parameter that `allows ref struct` is treated the same way.
+- Every other type takes no lifetime argument, because its values cannot contain a `ref`: an `int` can be copied anywhere.
+
+The argument of a `ref` is called its *ref lifetime* and the argument of a `ref struct` type is called its *value lifetime*. In `ref<$a> S<$b>`, `$a` is the ref lifetime and `$b` is the value lifetime.
+
+The argument is a bound, not a property of the value, so one value can have more than one type: a `ref<$heap> int` is also a `ref<$local> int`. [Lifetime variance](#lifetime-variance) describes when this is allowed.
+
+The target of a `ref<$a> T` is a location whose actual lifetime is not known. Only the bound is, so the type system treats the target as a location with the lifetime `$a`. A `ref` field needs no rule of its own: its type is `ref<$this> T`, so its target is treated as having the `$this` argument of the containing value.
+
+One rule connects locations to the values stored in them. A location must not outlive anything its contents refer to, so a location with the lifetime `$a` can only hold a value of type `T<$b>` when `$b` is convertible to `$a`. This is why `$b` must be convertible to `$a` in `ref<$a> T<$b>`.
+
+These correspond to the terms used by the rest of the rules. The *ref-safe-context* of an expression is the lifetime of the location it denotes, and the *safe-context* of an expression is the value lifetime of its type. An expression whose type takes no lifetime argument has no restriction, which those rules call a *safe-context* of *caller-context*.
 
 The samples make the lifetimes of an expression explicit by annotating it, for example `ref<$heap> array[0]` or `default(S<$heap>)`.
 
@@ -73,10 +80,10 @@ A single parameter means a type cannot give its fields differing lifetimes, but 
 
 An assignment or return is legal when the underlying conversion between lifetime types is legal, and the variance of a lifetime parameter determines which conversions are legal. Variance restrictions come from a combination of two factors: whether a location may be aliased, and whether it can be read or written through that alias.
 
-- A location that may be aliased and only allows reading is covariant.
-- A location that may be aliased and only allows writing is contravariant.
-- A location that may be aliased and allows both reading and writing is invariant.
-- A value that cannot be aliased, because it is always copied, can only be read from the point of view of its source and hence is covariant.
+- The type of a location that may be aliased and only allows reading is a covariant position.
+- The type of a location that may be aliased and only allows writing is a contravariant position.
+- The type of a location that may be aliased and allows both reading and writing is an invariant position.
+- The type of a value that cannot be aliased, because it is always copied, is a covariant position. From the point of view of its source the value can only be read.
 - A parameter that is not used at all is bivariant.
 
 For conversions a `ref` is considered part of the type of the expression: `ref<$a> T<...>` is logically `ref<$a, T<...>>`, where `$a` is covariant and `T` is invariant. The rules above explain that variance. A `ref` can be thought of as a primitive `ref struct` that contains a pointer:
@@ -104,29 +111,32 @@ static void M<$ro, $cm>(ref<$ro> Span<$cm> span)
 
 The value behind a `ref readonly` can only be read, so by the rules above `T` could soundly be covariant in `ref readonly<$a> T`. The language does not take advantage of this for ref reassignment: rule 2 applies to `ref readonly` the same as it does to `ref`. It does take advantage of it in [method arguments must match](csharp-11.0/low-level-struct-improvements.md#rules-method-arguments-must-match), which considers `ref` arguments of `ref struct` type but not `in` arguments, because the callee cannot write a value through them.
 
+The target of an `out` parameter is the opposite case. The method being called must assign it before reading it, which definite assignment enforces, so the caller's location is only written. Its type is therefore a contravariant position for the argument: a method that writes an `S<$a>` can be given a location that holds an `S<$b>` when `$a` is convertible to `$b`.
+
 A `ref struct` is an aggregate of its fields, so the variance of its lifetime parameters follows from how its fields use them. A lifetime parameter can only be covariant if every field uses it in a covariant position. This is why `$this` can be declared `out $this`: `ref` fields have the form `ref<$this> T`, which uses `$this` in the covariant `$a` position of `ref<$a, T>`, and fields of `ref struct` type have the form `T<$this>`, which is covariant by the same rule. `$this` never appears behind a pointer, which would be an invariant position, because a `ref` field cannot refer to a `ref struct`.
 
 ### Methods
 
 A method declares lifetime parameters and constraints between them. Inside the method an assignment, a `return` or an argument is legal when the conversion between the lifetime types is legal.
 
-A call supplies a lifetime for each lifetime parameter of the method. Every argument must convert to the type of its parameter once those lifetimes are filled in, and the result of the call has the return type with the same lifetimes filled in.
+A call supplies a lifetime for each lifetime parameter of the method. The lifetimes supplied must satisfy the constraints of the method. Every argument must convert to the type of its parameter once those lifetimes are filled in, and the result of the call has the return type with the same lifetimes filled in.
 
 One signature can stand in for another, as in an override, an interface implementation or a delegate conversion, when it accepts every argument the other accepts and returns only what the other can return. Parameter types are contravariant and the return type is covariant.
 
 ### Safety
 
-A location is live for at least as long as its lifetime. The property that the type system is meant to guarantee is:
+The property that the type system is meant to guarantee is:
 
-> In a program that type checks, whenever a `ref<$a> T` is read or written the location it refers to is still live. The same holds for every `ref` contained in a value of type `S<$a>`.
+> In a program that type checks, whenever a `ref` is read or written the location it refers to is still live. This includes every `ref` contained in a value of a `ref struct` type.
 
-The argument has the following shape. It is a sketch, not a proof, and it does not cover `unsafe` code.
+The argument has the following shape. It is a sketch, not a proof. It does not cover `unsafe` code, and it relies on definite assignment for `out` parameters.
 
-- A `ref` is created with the lifetime of its location, by the table above.
-- A conversion can shorten the lifetime of a `ref` but never lengthen it, because that lifetime is covariant.
-- A conversion cannot change the lifetime of anything behind a pointer, because that position is invariant. A location therefore never holds a value that lasts for less time than some view of the location claims.
-- A value cannot be stored in a location that outlives it, because the value must last at least as long as the location.
-- A value leaves a method only through its return or through a `ref` or `out` parameter. The types of those name only lifetimes the caller supplied, and `$local` cannot appear in them, so nothing that refers to the stack of the method can leave it.
+- A `ref` is created with the lifetime of its location as its ref lifetime, by the table above. Its bound is true when it is created.
+- A conversion can shorten a ref lifetime or a value lifetime but never lengthen it, because those positions are covariant. A bound that was true stays true.
+- A conversion cannot change the type of anything behind a pointer, because that position is invariant. Every alias of a location therefore agrees on the bounds of the value stored in it, and a write through one alias cannot break the bound that another alias reads.
+- A location with the lifetime `$a` only holds values whose lifetime arguments are convertible to `$a`. A location therefore never holds a `ref` to a location that ends before it does. This applies to the heap as well: a location with the lifetime `$heap` cannot hold a `ref` to the stack.
+- When a block ends, the only values that can refer to its locals have a lifetime argument no longer than the block. By the previous point they are stored only in locations that end with the block or before it.
+- A value leaves a method only through its return, or by being written to the target of a `ref` or `out` parameter. The types of those are output positions, which name only lifetimes the caller supplied. `$local` and the lifetimes of nested blocks are not convertible to any of them, so nothing that refers to the stack of the method can leave it.
 
 ## Signature translation
 
@@ -139,7 +149,7 @@ A method is given two lifetime parameters, named `$ro` for *return-only* and `$c
 - `ref` and `in` parameters have a ref lifetime of `$ro`.
 - Parameters of `ref struct` type have a value lifetime of `$cm`.
 - `ref` returns have a ref lifetime of `$ro`.
-- Returns of `ref struct` type have a value lifetime of `$ro`.
+- Returns of `ref struct` type have a value lifetime of `$ro`. A `ref` return of `ref struct` type is the exception: its target is behind a pointer, so it has the same value lifetime as the `ref` parameters it can come from, `$cm`. `ref S M(...)` maps to `ref<$ro> S<$cm> M(...)`.
 - `scoped` changes the lifetime it applies to into `$local`: the ref lifetime for `scoped ref`, and the value lifetime for a `scoped` parameter of `ref struct` type.
 - `out` parameters are implicitly `scoped`, and as an output of the method a `ref struct` value has a value lifetime of `$ro`: `out S s` maps to `ref<$local> S<$ro> s`.
 - `[UnscopedRef]` removes an implicit `scoped`. On a `ref` parameter, which has none, it raises the ref lifetime from `$ro` to `$cm`.
@@ -165,13 +175,17 @@ ref struct S<out $this>
 }
 ```
 
-The translation is a choice of defaults, and safety does not depend on it. For example, a translation with a single lifetime parameter, where `ref` parameters and `ref struct` parameters both use `$cm`, is also safe. With it a method can store a `ref` parameter into a `ref struct` parameter, so every call that passes a `ref` to a local alongside a `ref struct` that lasts longer has to be an error. Giving `ref` parameters the shorter lifetime `$ro` makes the store an error inside the one method that attempts it and keeps those calls legal. That is the purpose of the *return-only* context.
+The translation is a choice of defaults, and safety does not depend on it. For example, a translation with a single lifetime parameter, where `ref` parameters and `ref struct` parameters both use `$cm`, is also safe. With it a method can store a `ref` parameter into a `ref struct` that is passed by `ref`, so every call that passes a `ref` to a local alongside a `ref` to a `ref struct` that lasts longer has to be an error. Giving `ref` parameters the shorter lifetime `$ro` makes the store an error inside the one method that attempts it and keeps those calls legal. That is the purpose of the *return-only* context.
 
 ## Body inference
 
 Inside a method the lifetimes that the source does not state are chosen as follows. When no choice type checks, the program is in error.
 
+The lifetimes in scope at any point in a method are totally ordered: `$heap`, then `$cm`, `$ro`, `$local`, and the lifetime of each enclosing nested block in turn. "The longest lifetime" that satisfies a set of constraints is therefore well defined.
+
 **Locals.** The location of a local has the lifetime of the block that declares it. The ref lifetime of a `ref` local and the value lifetime of a local of `ref struct` type are taken from the initializer. A `scoped` local uses the lifetime of its block instead.
+
+A value lifetime taken from an initializer is never longer than `$cm`. The rules as the compiler implements them do not distinguish `$heap` from `$cm` inside a method, and nothing in a method requires a `ref struct` value to be `$heap`. Without this limit a local initialized with `default` would be an `S<$heap>`, and passing it by `ref` together with a parameter of type `S<$cm>` would fail the exact match that an invariant position requires.
 
 **Calls.** The caller picks the longest lifetimes for which every argument converts to the type of its parameter:
 
