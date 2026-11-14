@@ -155,6 +155,10 @@ A method is given two lifetime parameters, named `$ro` for *return-only* and `$c
 - `out` parameters are implicitly `scoped`, and as an output of the method a `ref struct` value has a value lifetime of `$ro`: `out S s` maps to `ref<$local> S<$ro> s`.
 - `[UnscopedRef]` removes an implicit `scoped`. On a `ref` parameter, which has none, it raises the ref lifetime from `$ro` to `$cm`.
 
+`scoped` and `[UnscopedRef]` add no rules to the type system. They only select which lifetime a declaration is given, and everything they allow or prevent follows from type checking the result. A `scoped ref` parameter cannot be captured because `$local` is not convertible to any lifetime in an output position. An `[UnscopedRef] ref` parameter can be stored in a `ref struct` parameter because both have the lifetime `$cm`.
+
+The annotations are still part of the signature of a member. They are emitted to metadata, and they are compared when a member overrides or implements another or is converted to a delegate type.
+
 Instance methods and constructors need no rules of their own. Both are translated to `static` methods with an explicit `this` parameter, and the list above gives its type:
 
 - In an instance method of a `struct`, `this` is an implicitly `scoped` `ref` parameter: `ref<$local> S<$cm> this`. With `[UnscopedRef]` it is `ref<$ro> S<$cm> this`.
