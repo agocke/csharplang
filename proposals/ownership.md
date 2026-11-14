@@ -351,11 +351,15 @@ The core problem is that once the array is read out of the field, its provenance
 
 Concretely, suppose `e` is an expression of type `ref<$a> R`, `ref readonly<$a> R`, `Borrow<$a, R>`, or `ReadOnlyBorrow<$a, R>`, or a borrow that was itself produced by projection, and `F` is a field of the target. Then `e.F` is typed as follows:
 
-- If `F` is of a resource struct type, `e.F` is a location with the lifetime `$a`, accessed by reference: `ref<$a> F`, or `ref readonly<$a> F` if `e` is read-only. When `e` is a by-ref, this is exactly what the model already says for fields of structs.
-- If `F` is of a resource class type `U`, `e.F` is a `Borrow<$a, U>`, or a `ReadOnlyBorrow<$a, U>` if `e` is read-only.
-- If `F` is of any other reference type `U`, `e.F` is a `Borrow<$a, U>`. Since `U` isn't a resource, the aliasing rules from [mutability](#mutability) don't apply to it -- the borrow may be copied, and what can be done with the target is governed by `U`, just as for a `readonly` field of type `U` today.
-- If `F` is of a struct type that contains references, its value can't be copied out of `e`. It is accessed by reference, and the references inside it are read by projection.
-- Otherwise, `F` contains no references and is read as a normal value.
+| Type of `F` | Type of `e.F` | If `e` is read-only |
+| --- | --- | --- |
+| Resource struct `F` | `ref<$a> F` | `ref readonly<$a> F` |
+| Resource class `U` | `Borrow<$a, U>` | `ReadOnlyBorrow<$a, U>` |
+| Other reference type `U` | `Borrow<$a, U>` | `Borrow<$a, U>` |
+| Struct that contains references | Accessed only by reference; its references are read by projection | Same |
+| Type that contains no references | Its normal value | Same |
+
+A few of these deserve explanation. For a resource struct field, `e.F` is a location with the lifetime `$a`. When `e` is a by-ref, this is exactly what the model already says for fields of structs. For a reference field that isn't a resource, the aliasing rules from [mutability](#mutability) don't apply -- the borrow may be copied, and what can be done with the target is governed by `U`, just as for a `readonly` field of type `U` today. And a struct field that contains references can't be copied out of `e`, since copying it would copy out the references inside it without their lifetime.
 
 Element reads through a `Borrow<$a, U[]>` follow the same rules, so the elements of a jagged array are borrows too.
 
@@ -430,12 +434,16 @@ if (condition)
 Consume(rented);                 // error: rented may be loaned
 ```
 
-A loan lasts until the end of the scope of its place, or until the end of the method for `this` and parameters. Two places _overlap_ when one is the other, or is reached through it. At a point where a place `p` is possibly loaned, the following are illegal for any place that overlaps `p`:
+A loan lasts until the end of the scope of its place, or until the end of the method for `this` and parameters. Two places _overlap_ when one is the other, or is reached through it. At a point where a place `p` is possibly loaned, the following rules apply to any place that overlaps `p`:
 
-- Transferring it.
-- Assigning it, which drops its previous value.
-- Borrowing it mutably, if the loan of `p` is read-only. A mutable borrow could reassign a resource field and drop the target of the loan.
-- Using it at all, if the loan of `p` is mutable.
+| Operation | `p` has a read-only loan | `p` has a mutable loan |
+| --- | --- | --- |
+| Read, or borrow read-only | Allowed | Error |
+| Borrow mutably | Error | Error |
+| Assign, dropping the previous value | Error | Error |
+| Transfer | Error | Error |
+
+Mutable borrows are prohibited even under a read-only loan because a mutable borrow could reassign a resource field, dropping the target of the loan.
 
 No check is needed when a place leaves scope. Every borrow of the place has a lifetime no longer than its block, so every borrow is out of scope too. Owning variables are dropped in reverse declaration order, since a resource declared after `v` may hold a borrow of `v` and use it in its `Drop`.
 
