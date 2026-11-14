@@ -32,6 +32,7 @@ Only locations have lifetimes. A location is a piece of storage, and its lifetim
 | An array element, a `static` field, or a field `e.F` where `e` is of a reference type | `$heap` |
 | A local | The lifetime of the block that declares it |
 | A value parameter | `$local` |
+| Memory allocated by `stackalloc` | `$local`. It is released when the method returns, not when the block ends. |
 | A temporary that holds the value of an expression | The lifetime of the block that contains the expression |
 | A field `e.F` where `e` is of a struct type | The lifetime of the location `e` |
 
@@ -183,7 +184,7 @@ Inside a method the lifetimes that the source does not state are chosen as follo
 
 The lifetimes in scope at any point in a method are totally ordered: `$heap`, then `$cm`, `$ro`, `$local`, and the lifetime of each enclosing nested block in turn. "The longest lifetime" that satisfies a set of constraints is therefore well defined.
 
-**Locals.** The location of a local has the lifetime of the block that declares it. The ref lifetime of a `ref` local and the value lifetime of a local of `ref struct` type are taken from the initializer. A `scoped` local uses the lifetime of its block instead.
+**Locals.** The location of a local has the lifetime of the block that declares it. The ref lifetime of a `ref` local and the value lifetime of a local of `ref struct` type are taken from the initializer. A `scoped` local uses the lifetime of its block instead. A local of `ref struct` type with no initializer has a value lifetime of `$cm`.
 
 A value lifetime taken from an initializer is never longer than `$cm`. The rules as the compiler implements them do not distinguish `$heap` from `$cm` inside a method, and nothing in a method requires a `ref struct` value to be `$heap`. Without this limit a local initialized with `default` would be an `S<$heap>`, and passing it by `ref` together with a parameter of type `S<$cm>` would fail the exact match that an invariant position requires.
 
