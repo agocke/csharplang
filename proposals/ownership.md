@@ -153,7 +153,7 @@ Values returned from instance members get no special treatment. Suppose a member
 
 #### Borrow lifetimes
 
-Unlike owned values, borrowed values have a special restriction: they can't live longer than their parent value. The language already has a system of lifetimes for `ref` and `ref struct`. The [ref safety model](ref-safety-model.md) describes it as two layers: a type system in which lifetimes are explicit, and inference that maps C# source onto that type system. Ownership adopts the model and extends it. The extensions are new types, a new typing rule, new cases in the signature translation, and a flow analysis that runs alongside the type system. Only one of them changes a rule of the model: the lifetime of the fields of resource classes, described in [lifetime-bearing types](#lifetime-bearing-types). A program that uses no resource types is checked exactly as it is today.
+Unlike owned values, borrowed values have a special restriction: they can't live longer than their parent value. The language already has a system of lifetimes for `ref` and `ref struct`. The [ref safety model](ref-safety-model.md) describes it as two layers: a type system in which lifetimes are explicit, and inference that maps C# source onto that type system. Ownership adopts the model and extends it. The extensions are new types, a new kind of location, a new typing rule, new cases in the signature translation, and a flow analysis that runs alongside the type system. The model's rules describe the types and locations that exist in C# today, and none of the extensions changes them. A program that uses no resource types is checked exactly as it is today.
 
 This section uses the notation of the model: `ref<$a> T` for a `ref` whose target lives for at least `$a`, `$heap` for the lifetime of the heap, `$local` for the outermost block of the current method, and `$ro` and `$cm` for the *return-only* and *caller-context* lifetime parameters that every method is given.
 
@@ -227,7 +227,7 @@ A lifetime-bearing resource type is translated like a `ref struct`.
 
 Only `ref struct` types, resource structs and resource classes may contain borrows. The model only allows a location with the lifetime `$a` to hold a value of type `T<$b>` when `$b` is convertible to `$a`. The fields of an ordinary class, the elements of an array and a boxed value are all `$heap` locations, so they could only ever hold borrows whose lifetime is `$heap`. Generic substitution, boxing and capture would move a value into such a location without the type system seeing it. Resource structs already can't be boxed, captured or substituted for type parameters, which are the same restrictions that make `ref struct` types safe, so they can carry a lifetime.
 
-Resource classes need one more rule, because their fields are on the heap. The model's location table gives a field `e.F` the lifetime `$heap` when `e` is of a reference type. For a resource class, the field instead has the lifetime of `e`. That is the lifetime of the owning variable, or `$b` when `e` is a `Borrow<$b, R<$a>>`. In either case it is no longer than the class's `$this`:
+Resource classes need one more rule, because their fields are on the heap. The model's location table gives the fields of the classes that exist today the lifetime `$heap`. Ownership adds a row for a new kind of location, the field of a resource class, which has the lifetime of the expression `e` it is accessed through. That is the lifetime of the owning variable, or `$b` when `e` is a `Borrow<$b, R<$a>>`. In either case it is no longer than the class's `$this`:
 
 ```csharp
 class Parser : IResource
@@ -262,7 +262,7 @@ This is sound because a resource class object is reachable only through its owne
 
 The runtime adds one limit. Byrefs can't be stored on the heap, so a resource class can't contain `ref` fields or fields of `ref struct` type, which include `Span<T>`. It can contain `Borrow` and `ReadOnlyBorrow` fields, which are object references at runtime, and lifetime-bearing resource structs that contain them.
 
-Arrays of resources can't hold borrows. Their elements are `$heap` locations, and this proposal doesn't change that.
+This proposal doesn't add a corresponding row for the elements of arrays of resources. Those elements are `$heap` locations, so arrays of resources can't hold borrows.
 
 ##### Receivers
 
@@ -404,13 +404,10 @@ Consume(rented);                 // error: rented is loaned, although span is no
 
 ##### Relationship to the ref safety model
 
-Ownership changes one rule of the [ref safety model](ref-safety-model.md) and otherwise only adds to it.
-
-The change is to the location table. A field of a resource class has the lifetime of the expression it is accessed through, rather than `$heap`, as described in [lifetime-bearing types](#lifetime-bearing-types). The row for fields of reference types no longer covers every class. Resource classes are new, so no existing program is affected. The model's safety argument gains a premise: a resource class object is reachable only through its owner and through borrows of it. That premise is what lets the storage of a location outlive the lifetime the table gives it.
-
-Everything else is an addition:
+Ownership adds to the [ref safety model](ref-safety-model.md) without changing it. The model's rules describe the types and locations that exist in C# today, and everything ownership introduces is new:
 
 - `Borrow<$a, T>` and `ReadOnlyBorrow<$a, T>` are `ref struct` types with a single covariant lifetime parameter, which the model already describes.
+- The field of a resource class is a new kind of location. It gets a new row in the location table, as described in [lifetime-bearing types](#lifetime-bearing-types). Unlike the existing rows, its lifetime comes from reachability rather than from how long its storage exists: the object is reachable only through its owner and through borrows of it, so no field can be read after `$this` ends. The rules for resource types guarantee this, and the model already reasons this way about the target of a `ref<$a> T`, which it treats as a location with the lifetime `$a` whatever its actual lifetime.
 - Borrow projection is a new typing rule. Apart from the fields of resource classes, the lifetimes it produces come from the model's existing covariant conversions.
 - The receivers of resource members, of `[BorrowedReceiver]` members and of `Drop` are new cases in the signature translation, whose defaults the model leaves open.
 - Owner lifetimes are the lifetimes of locations, as the location table defines them, so the lifetimes in scope remain totally ordered.
@@ -636,7 +633,8 @@ The indexer's receiver is `ref<$ro> OwnedImmutableBuilder<T>`, so it reads `_bac
 - **Struct fields that contain references.** Projection makes these accessible only by reference, so a field of type `ImmutableArray<T>` can't be copied out of a resource. Calling its members would require borrowed receivers on structs.
 - **Depth of `readonly`.** Projection keeps the shallow `readonly` of C#, so a `readonly` member can return a `Span<T>` over an array field. If read-only borrows should also prevent writes to contents that are not resources, projection through a read-only borrow would have to produce read-only results. `RentedArray` could then only expose a `ReadOnlySpan<T>`.
 - **Loan duration.** Loans last until the end of their place's scope. Ending a loan when the variables that hold its borrows go out of scope would accept more programs, but loan checking would then have to track which variables hold borrowed values.
-- **Further changes to the ref safety model.** Two extensions would accept more programs, at the cost of more changes to the [ref safety model](ref-safety-model.md). Ending an owner's lifetime where it is transferred, as non-lexical lifetimes do, would make lifetimes partially ordered and require a rule that a value is only used within the lifetimes in its type. Arrays of resources could hold borrows by the same argument as resource classes, with their elements given the lifetime of the array instead of `$heap`.
+- **Arrays of resources holding borrows.** By the same argument as resource classes, the elements of an array of resources could be given the lifetime of the array instead of `$heap`. This would be another new row in the location table.
+- **Non-lexical lifetimes.** Ending an owner's lifetime where it is transferred would accept more programs, but unlike the other extensions it would change the [ref safety model](ref-safety-model.md). Body inference relies on the lifetimes in scope being totally ordered. A lifetime that ends partway through a block breaks that, and it would also require a rule that a value is only used within the lifetimes in its type.
 
 ## Acknowledgements
 
