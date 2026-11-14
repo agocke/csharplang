@@ -179,7 +179,9 @@ ref struct ExclusiveBorrow<out $a, T> where T : class { ... }
 
 Note that these are formally ref structs. The model gives every ref struct exactly one lifetime parameter, and `$a` is that parameter, so all the model's rules apply to borrows as-is. In particular, `$a` is covariant -- a `Borrow<$heap, C>` may be converted to a `Borrow<$local, C>`, but not the reverse. Similarly, a `Borrow<T>` parameter is a `Borrow<$cm, T>` and a returned `Borrow<T>` is a `Borrow<$ro, T>`, just like any other ref struct.
 
-There are also conversions between borrows and regular references. A regular reference of type `T` may be implicitly converted to `Borrow<$heap, T>` or `ExclusiveBorrow<$heap, T>`, since the GC keeps the target alive for as long as the borrow exists. However, there is no conversion from a borrow back to `T`, as that would discard the lifetime.
+There are also conversions between borrows and regular references. A regular reference of type `T` may be implicitly converted to `Borrow<$heap, T>`, since the GC keeps the target alive for as long as the borrow exists. However, it may not be converted to `ExclusiveBorrow<$heap, T>`. Other references to the same object may exist, so the borrow wouldn't really be exclusive -- and code receiving an `ExclusiveBorrow<T>` would have no way to tell it apart from one that is. Lastly, there is no conversion from a borrow back to `T`, as that would discard the lifetime.
+
+Between the two kinds of borrow, an exclusive borrow may be used wherever a shared borrow is expected, but not the reverse.
 
 Lastly, what can be done through a borrow is limited. Members of a class may only be called through a borrow if their receiver is borrowed -- either because they are instance members of a resource type, or because they are marked `[BorrowedReceiver]` (see [bridging the worlds](#bridging-the-worlds)). Arrays get a few intrinsic operations: a `Borrow<$a, T[]>` can be indexed, producing a `ref<$a> T`, its `Length` can be read, and it can be converted to `Span<$a, T>` or `ReadOnlySpan<$a, T>`. Array elements are `$heap` locations, so producing a `ref<$a> T` is just the model's ordinary covariant conversion from `ref<$heap> T`. Fields are read by [borrow projection](#borrow-projection), described below.
 
@@ -304,7 +306,9 @@ We've already said that all instance members of resource types have a borrowed r
 | Instance member of a resource class `R` | `ExclusiveBorrow<$ro, R>` |
 | `readonly` instance member of a resource class `R` | `Borrow<$ro, R>` |
 | Constructor of a resource class `R` | `ExclusiveBorrow<$local, R>` |
-| `[BorrowedReceiver]` member of a class `C` | `ExclusiveBorrow<$ro, C>`, or `Borrow<$ro, C>` if `readonly` |
+| `[BorrowedReceiver]` member of a non-resource class `C` | `Borrow<$ro, C>` |
+| `[BorrowedReceiver(Exclusive = true)]` member of a non-resource class `C` | `ExclusiveBorrow<$ro, C>` |
+| `[BorrowedReceiver]` constructor of a non-resource class `C` | `ExclusiveBorrow<$local, C>` |
 | `Drop` of a resource type `R` | `R`, owned |
 
 For example,
@@ -557,7 +561,11 @@ These states are mutually exclusive, and are enforced by [loan checking](#loan-c
 
 It's important to note that the difference between the two kinds of borrow is uniqueness, not mutability. Mutability is a complicated topic in C#, with `readonly` only applying to the outer layer of a value. Instead, what matters for ownership is whether a borrow can invalidate a value that someone else is using. An exclusive borrow is the only way to access the value while it exists, which makes it safe to reassign the value's fields -- and, by doing so, drop its resource fields. A shared borrow may coexist with others, so its holder may not reassign the value's fields, or one holder could drop a resource field that another is still using. That restriction is exactly C#'s existing, shallow `readonly`. Neither kind of borrow says anything about the contents of non-resource fields, which may be modified through either one, as governed by their own types.
 
-To accommodate shared borrows we also have to adjust the rules for classes themselves. The `readonly` keyword will now be legal for class methods, just like struct methods. It will have the same rules. An ordinary (non-readonly) class instance method will have an `ExclusiveBorrow<this>` receiver. A `readonly` instance member has a `Borrow<this>` receiver. Importantly, shared borrows may only call readonly members. For structs, the same distinction is spelled `ref` for an exclusive borrow and `ref readonly` for a shared one.
+To accommodate shared borrows we also have to adjust the rules for classes themselves. The `readonly` keyword will now be legal for class methods, just like struct methods. It will have the same rules. An ordinary (non-readonly) instance method of a resource class will have an `ExclusiveBorrow<this>` receiver. A `readonly` instance member has a `Borrow<this>` receiver. Importantly, shared borrows of a resource may only call readonly members. For structs, the same distinction is spelled `ref` for an exclusive borrow and `ref readonly` for a shared one.
+
+Note that the `readonly` restriction only exists to protect resource fields, so it doesn't apply to classes that aren't resources. They can't contain resource fields, so reassigning their fields can't drop anything. A shared borrow of such a class may call any member with a borrowed receiver, `readonly` or not -- this is just the interior mutability that C# has always had. For these classes, the meaningful choice is between shared and exclusive receivers, as described in [bridging the worlds](#bridging-the-worlds).
+
+Since regular references can't be converted to exclusive borrows, an `ExclusiveBorrow<T>` always comes from an owner -- a resource, or an `Owned<T>` -- and code that receives one can rely on it being the only access to the value. Among other things, this means nothing else can access the value's fields while the borrow exists, including from another thread. Note that this only covers the value's own fields, not other objects that they refer to, unless those are owned as well.
 
 ### Bridging the worlds
 
@@ -566,7 +574,10 @@ If owned resources and GC types do not cooperate they will force parallel worlds
 The solution is to allow individual methods of classes to opt-in to having _borrowed receivers_. This feature requires a new attribute:
 
 ```C#
-public sealed class BorrowedReceiver : System.Attribute {}
+public sealed class BorrowedReceiver : System.Attribute
+{
+    public bool Exclusive { get; init; }
+}
 ```
 
 Arbitrary class types may apply it to any number of instance methods:
@@ -581,17 +592,40 @@ class C
 }
 ```
 
-The effect is to change the type of the receiver from the containing type `C`, to the borrow type `ExclusiveBorrow<C>`, or `Borrow<C>` for a `readonly` member.  The full formal lifetime would look like,
+The effect is to change the type of the receiver from the containing type `C`, to the borrow type `Borrow<C>`.  The full formal lifetime would look like,
 
 ```C#
 class C
 {
     [BorrowedReceiver]
-    public static void M1<$ro>(ExclusiveBorrow<$ro, C> @this) { ... }
+    public static void M1<$ro>(Borrow<$ro, C> @this) { ... }
 }
 ```
 
-Like all borrows, it would be illegal to convert a borrowed reference to a GC reference. Thus, `M1` is restricted from escaping the receiver outside the current method. Inside a `[BorrowedReceiver]` member, the fields of `this` are read by [borrow projection](#borrow-projection), so the member can't leak references to the object's contents either. This cleanly allows arbitrary class types to appear as borrowed types. `BorrowedReceiver` is also legal on constructors -- because constructors can access `this` they have the same risk of exposing it outside the constructor method, unless it is typed as a borrow.
+Like all borrows, it would be illegal to convert a borrowed reference to a GC reference. Thus, `M1` is restricted from escaping the receiver outside the current method. Inside a `[BorrowedReceiver]` member, the fields of `this` are read by [borrow projection](#borrow-projection), so the member can't leak references to the object's contents either. This cleanly allows arbitrary class types to appear as borrowed types. `BorrowedReceiver` is also legal on constructors -- because constructors can access `this` they have the same risk of exposing it outside the constructor method, unless it is typed as a borrow. A constructor's receiver is always exclusive, since the object is new and nothing else can refer to it yet.
+
+Note that the receiver of `M1` is a shared borrow, even though `M1` isn't `readonly`. That's what lets `M1` be called on a regular GC reference, which can only be converted to a shared borrow. Since `C` isn't a resource, this is safe -- nothing in `C` can be dropped, so mutating it through a shared borrow can't invalidate anything another holder is using.
+
+Some members need more than that. A member whose correctness depends on nothing else accessing the object at the same time -- because it temporarily breaks an invariant, or because a data race would corrupt its state -- can ask for an exclusive receiver instead:
+
+```C#
+class C
+{
+    [BorrowedReceiver(Exclusive = true)]
+    public void M3() { ... }
+}
+
+// Maps to
+
+class C
+{
+    public static void M3<$ro>(ExclusiveBorrow<$ro, C> @this) { ... }
+}
+```
+
+Such a member can't be called on a regular GC reference, since there is no conversion to an exclusive borrow. It can only be called through an owner, like the `Owned<C>` described below. In exchange, it can rely on its receiver being the only access to the object. (The attribute is a placeholder until dedicated syntax for borrows is considered.)
+
+This is very similar to how Rust handles reference-counted objects. A Rust `Rc<T>` only provides shared references, `&T`, since other `Rc`s to the same value may exist, and getting a `&mut T` requires a runtime check that the count is one. A regular C# reference is the same -- it only converts to a shared borrow. The difference is what can be done through a shared reference. In Rust, any mutation can invalidate memory, like a `Vec` reallocating its buffer, so mutating through an `Rc` requires interior mutability types like `RefCell`. In C#, mutating a non-resource object never invalidates memory, since the GC keeps everything alive. The only thing that can invalidate a value is dropping a resource, and non-resource types can't contain resources. So C# can allow mutation through shared borrows of non-resource classes, which effectively gives every GC object interior mutability for free.
 
 However, converting just GC types to borrows is not particularly useful on its own. We would like to be able to treat a class as either GC-tracked or owned, _per instantiation_. To do so we will need another instrinsic type:
 
@@ -610,7 +644,7 @@ This is another primitive type with special permissions and restrictions.
 * Existing instances of `T` may never be converted to `Owned` -- `Owned` must completely control the lifetime of the instance.
 * Direct access to `Value` is prohibited. Instead, all `BorrowedReceiver` methods on `T` will re-exported as theough on the `Owned<T>` instance and the compiler is responsible for translating all such invocations through `Value`.
 
-`Owned` therefore allows individual instantiations to control whether they are GC-tracked or borrowed. `string` would remain GC-tracked by default, but an `Owned<string>` could also be created that would follow ownership rules. This may provide performance advantages in certain scenarios. This also does not lift all restrictions related to ownership: optionally-GC-tracked types may never contain fields of a resource type.
+Members with exclusive receivers can only be called through an exclusive borrow of the `Owned<T>`. `Owned` therefore allows individual instantiations to control whether they are GC-tracked or borrowed. `string` would remain GC-tracked by default, but an `Owned<string>` could also be created that would follow ownership rules. This may provide performance advantages in certain scenarios. This also does not lift all restrictions related to ownership: optionally-GC-tracked types may never contain fields of a resource type.
 
 Notably, there is one very useful type that `Owned` does not help: arrays. Resource types may not safely appear as element types in normal arrays for multiple reasons:
 
@@ -765,6 +799,7 @@ Note how projection applies here. The indexer's receiver is `ref<$ro> OwnedImmut
 - [ ] Existing APIs. A borrow can't be passed to an existing method that takes `T[]` or another class type. We could extend `[BorrowedReceiver]` to parameters, typing them as `Borrow<$ro, T>`, or `Borrow<$local, T>` when `scoped`. Since a regular reference converts to `Borrow<$heap, T>`, annotating a parameter this way wouldn't break existing callers. The implicit conversion from `T[]` to `Span<T>` would be a good candidate.
 - [ ] Struct fields that contain references. Projection makes these accessible only by reference, so a field of type `ImmutableArray<T>` can't be copied out of a resource. Calling its members would require borrowed receivers on structs.
 - [ ] Generic substitution. Resource types can't be substituted for type parameters, but ref structs can be substituted for type parameters that `allows ref struct`. A similar anti-constraint could allow resources. Generic code would then have to treat the type parameter as a resource -- its values would be transferred rather than copied, dropped at the end of their scope, and have borrowed receivers. If the type argument can be lifetime-bearing, the type parameter would carry a lifetime, just as the [ref safety model](ref-safety-model.md) already describes for `allows ref struct`.
+- [ ] Data races. An exclusive borrow guarantees that nothing else can access the value's own fields, which rules out data races on them. Two gaps remain. First, the guarantee isn't transitive: other objects that the fields refer to may be shared, unless they are owned too. This interacts with the shared fields question above. Second, resources currently can't cross threads at all, since they can't be captured, stored in static fields, or substituted for type parameters, so they are race-free by construction. Once resources can cross threads, through generics or async, we'll need rules similar to Rust's `Send` and `Sync`: transferring an owned resource to another thread is fine, but sharing a borrow across threads is only safe if the target's shared-borrow members are thread-safe.
 - [ ] Depth of `readonly`. Projection keeps the shallow `readonly` of C#, so a `readonly` member can return a `Span<T>` over an array field. If shared borrows should also prevent writes to non-resource contents, projection through a shared borrow would have to produce read-only results, and `RentedArray` could only expose a `ReadOnlySpan<T>`.
 - [ ] Loan duration. Loans last until the end of their place's scope. Ending a loan when the variables holding its borrows go out of scope would accept more programs, but loan checking would then need to track which variables hold borrowed values.
 - [ ] Arrays of resources holding borrows. By the same argument as resource classes, the elements of an array of resources could be given the lifetime of the array instead of `$heap`. This would be another new row in the location table.
