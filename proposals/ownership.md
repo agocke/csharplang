@@ -64,7 +64,7 @@ The following rules apply to all resource types `R`:
     - Assigning an owning reference to another owning reference is considered a transfer of ownership.
       - If the variable may be assigned before another assignment, assigning it ends its lifetime
       - After transfer, use of the original reference is disallowed.
-  - There may be only one mutable reference, or any number of read-only references (aliasing rules).
+  - There may be only one exclusive borrow, or any number of shared borrows (aliasing rules).
   - `R` may not be substituted for generic type parameters
   - `R` may not be boxed into `object`, an interface, `dynamic`, or captured inside a delegate.
   - `R` may only inherit from `object`, `ValueType`, or another resource type
@@ -144,19 +144,19 @@ For classes, the opposite is true. A by-ref to a class variable produces a refer
 To represent borrowed class references, two new special types will be added to the core library. The definition is as follows:
 
 ```csharp
-struct Borrow<T>(T value) where T : class
-{
-    public T Value { get; set; } = value;
-}
-readonly struct ReadOnlyBorrow<T>(T value) where T : class
+readonly struct Borrow<T>(T value) where T : class
 {
     public T Value { get; } = value;
 }
+struct ExclusiveBorrow<T>(T value) where T : class
+{
+    public T Value { get; set; } = value;
+}
 ```
 
-Note that there is a mutable and read-only version of the `Borrow` type. These are analogous to `ref` and `ref readonly` and serve similar purposes. They fall into the same aliasing restrictions above: there may be either one mutable borrowed reference or any number of read-only borrows, but they are mutually exclusive.
+Note that there is a shared and an exclusive version of the `Borrow` type. Any number of shared borrows of a value may exist at once, while an exclusive borrow guarantees that nothing else can access the value as long as it exists. These are analogous to `ref readonly` and `ref`, and fall into the same aliasing restrictions above: there may be either one exclusive borrow or any number of shared borrows, but not both. Shared borrows are the common case, so they get the shorter name.
 
-Also note that the Borrow types are intrinsic -- they can violate some other rules, like substitution of resource types for generics. It is also illegal to copy a `Borrow<T>` of a resource type, as this would create multiple mutable references. For the same reason, a mutable borrow of a resource may not be stored in a field. A read-only borrow may be stored in a field of a ref struct or a resource type, and the containing type becomes lifetime-bearing, as described in [lifetime-bearing types](#lifetime-bearing-types). Copying such a type copies the read-only borrow and preserves its lifetime. The owner cannot be transferred, reassigned, or dropped while it is borrowed, which [loan checking](#loan-checking) enforces.
+Also note that the Borrow types are intrinsic -- they can violate some other rules, like substitution of resource types for generics. It is also illegal to copy an `ExclusiveBorrow<T>`, as this would create multiple exclusive borrows. For the same reason, an exclusive borrow may not be stored in a field. A shared borrow may be stored in a field of a ref struct or a resource type, and the containing type becomes lifetime-bearing, as described in [lifetime-bearing types](#lifetime-bearing-types). Copying such a type copies the shared borrow and preserves its lifetime. The owner cannot be transferred, reassigned, or dropped while it is borrowed, which [loan checking](#loan-checking) enforces.
 
 The `Value` property will be illegal to access by all code except the compiler. Note that all instance methods of resource types consider their receiver borrowed, so this includes all instance members. In fact, the compiler is responsible for analyzing all operations on `Borrow<T>` as if they were operations on `T` and automatically translating them through calls to `Value`.
 
@@ -174,12 +174,12 @@ For by-ref variables, we do not need to make any further modifications. The most
 
 ```csharp
 ref struct Borrow<out $a, T> where T : class { ... }
-ref struct ReadOnlyBorrow<out $a, T> where T : class { ... }
+ref struct ExclusiveBorrow<out $a, T> where T : class { ... }
 ```
 
 Note that these are formally ref structs. The model gives every ref struct exactly one lifetime parameter, and `$a` is that parameter, so all the model's rules apply to borrows as-is. In particular, `$a` is covariant -- a `Borrow<$heap, C>` may be converted to a `Borrow<$local, C>`, but not the reverse. Similarly, a `Borrow<T>` parameter is a `Borrow<$cm, T>` and a returned `Borrow<T>` is a `Borrow<$ro, T>`, just like any other ref struct.
 
-There are also conversions between borrows and regular references. A regular reference of type `T` may be implicitly converted to `Borrow<$heap, T>` or `ReadOnlyBorrow<$heap, T>`, since the GC keeps the target alive for as long as the borrow exists. However, there is no conversion from a borrow back to `T`, as that would discard the lifetime.
+There are also conversions between borrows and regular references. A regular reference of type `T` may be implicitly converted to `Borrow<$heap, T>` or `ExclusiveBorrow<$heap, T>`, since the GC keeps the target alive for as long as the borrow exists. However, there is no conversion from a borrow back to `T`, as that would discard the lifetime.
 
 Lastly, what can be done through a borrow is limited. Members of a class may only be called through a borrow if their receiver is borrowed -- either because they are instance members of a resource type, or because they are marked `[BorrowedReceiver]` (see [bridging the worlds](#bridging-the-worlds)). Arrays get a few intrinsic operations: a `Borrow<$a, T[]>` can be indexed, producing a `ref<$a> T`, its `Length` can be read, and it can be converted to `Span<$a, T>` or `ReadOnlySpan<$a, T>`. Array elements are `$heap` locations, so producing a `ref<$a> T` is just the model's ordinary covariant conversion from `ref<$heap> T`. Fields are read by [borrow projection](#borrow-projection), described below.
 
@@ -241,7 +241,7 @@ The model gives every ref struct exactly one lifetime parameter, `$this`, which 
 ```csharp
 struct E : IResource
 {
-    public ReadOnlyBorrow<C> Value;
+    public Borrow<C> Value;
 }
 ```
 
@@ -250,7 +250,7 @@ which has the full formal definition
 ```csharp
 struct E<out $this> : IResource
 {
-    public ReadOnlyBorrow<$this, C> Value;
+    public Borrow<$this, C> Value;
 }
 ```
 
@@ -263,9 +263,9 @@ Resource classes need one more rule, since their fields live on the heap. The mo
 ```csharp
 class Parser : IResource
 {
-    private ReadOnlyBorrow<Tokenizer> _tokens;
+    private Borrow<Tokenizer> _tokens;
 
-    public Parser(ReadOnlyBorrow<Tokenizer> tokens)
+    public Parser(Borrow<Tokenizer> tokens)
     {
         _tokens = tokens;
     }
@@ -277,11 +277,11 @@ has the full formal definition
 ```csharp
 class Parser<out $this> : IResource
 {
-    private ReadOnlyBorrow<$this, Tokenizer> _tokens;
+    private Borrow<$this, Tokenizer> _tokens;
 
-    static void ctor<$ro>(Borrow<$local, Parser<$ro>> @this, ReadOnlyBorrow<$ro, Tokenizer> tokens)
+    static void ctor<$ro>(ExclusiveBorrow<$local, Parser<$ro>> @this, Borrow<$ro, Tokenizer> tokens)
     {
-        // okay: the field is ReadOnlyBorrow<$ro, Tokenizer> and so is the argument
+        // okay: the field is Borrow<$ro, Tokenizer> and so is the argument
         @this._tokens = tokens;
     }
 }
@@ -289,7 +289,7 @@ class Parser<out $this> : IResource
 
 Unlike the existing locations, the lifetime of this location doesn't come from how long its storage exists -- the object may live on in the heap long after `$this` ends. Instead, it comes from reachability. A resource class object is only reachable through its owner and through borrows of its owner, both of which are bounded by `$this`, so no field can be read after `$this` ends. The rules for resource types guarantee this. A resource can't be converted to `object`, an interface, or a non-resource base type, and can't be boxed, captured, or substituted for a type parameter. `this` is a borrow in every member, including constructors, so no member can produce a regular reference to the object. And members inherited from non-resource types, like `object.MemberwiseClone`, can't be called through a borrow, since their receivers aren't borrowed. This isn't a new kind of reasoning for the model, either -- the target of a `ref<$a> T` is treated as a location with the lifetime `$a`, whatever its actual lifetime.
 
-There is one additional limitation from the runtime. By-refs can't be stored on the heap, so resource classes can't contain `ref` fields or ref struct fields, including `Span<T>`. They can contain `Borrow` and `ReadOnlyBorrow` fields, which are just object references at runtime, and lifetime-bearing resource structs that contain them.
+There is one additional limitation from the runtime. By-refs can't be stored on the heap, so resource classes can't contain `ref` fields or ref struct fields, including `Span<T>`. They can contain `Borrow` fields, which are just object references at runtime, and lifetime-bearing resource structs that contain them.
 
 We will not add a corresponding rule for the elements of arrays of resources, so they remain `$heap` locations and can't hold borrows.
 
@@ -301,10 +301,10 @@ We've already said that all instance members of resource types have a borrowed r
 | --- | --- |
 | Instance member of a resource struct `R` | `ref<$ro> R` |
 | `readonly` instance member of a resource struct `R` | `ref readonly<$ro> R` |
-| Instance member of a resource class `R` | `Borrow<$ro, R>` |
-| `readonly` instance member of a resource class `R` | `ReadOnlyBorrow<$ro, R>` |
-| Constructor of a resource class `R` | `Borrow<$local, R>` |
-| `[BorrowedReceiver]` member of a class `C` | `Borrow<$ro, C>`, or `ReadOnlyBorrow<$ro, C>` if `readonly` |
+| Instance member of a resource class `R` | `ExclusiveBorrow<$ro, R>` |
+| `readonly` instance member of a resource class `R` | `Borrow<$ro, R>` |
+| Constructor of a resource class `R` | `ExclusiveBorrow<$local, R>` |
+| `[BorrowedReceiver]` member of a class `C` | `ExclusiveBorrow<$ro, C>`, or `Borrow<$ro, C>` if `readonly` |
 | `Drop` of a resource type `R` | `R`, owned |
 
 For example,
@@ -333,9 +333,9 @@ struct R : IResource
 
 class C : IResource
 {
-    static void ctor(Borrow<$local, C> @this) { }
-    static void M<$ro>(Borrow<$ro, C> @this) { }
-    static void RO<$ro>(ReadOnlyBorrow<$ro, C> @this) { }
+    static void ctor(ExclusiveBorrow<$local, C> @this) { }
+    static void M<$ro>(ExclusiveBorrow<$ro, C> @this) { }
+    static void RO<$ro>(Borrow<$ro, C> @this) { }
 }
 ```
 
@@ -362,19 +362,19 @@ The receiver of `Span` is a borrow, but `_rented` is a plain `T[]`, and a span c
 
 The core problem is that once the array is read out of the field, its provenance is lost -- `T[]` has no place to record a lifetime. So instead we will change what reading the field produces. Reading a field through a borrow produces a borrow with the same lifetime. We call this _borrow projection_.
 
-Concretely, suppose `e` is an expression of type `ref<$a> R`, `ref readonly<$a> R`, `Borrow<$a, R>`, or `ReadOnlyBorrow<$a, R>`, or a borrow that was itself produced by projection, and `F` is a field of the target. Then `e.F` is typed as follows:
+Concretely, suppose `e` is an expression of type `ref<$a> R`, `ref readonly<$a> R`, `ExclusiveBorrow<$a, R>`, or `Borrow<$a, R>`, or a borrow that was itself produced by projection, and `F` is a field of the target. Then `e.F` is typed as follows:
 
-| Type of `F` | Type of `e.F` | If `e` is read-only |
+| Type of `F` | If `e` is exclusive | If `e` is shared |
 | --- | --- | --- |
 | Resource struct `F` | `ref<$a> F` | `ref readonly<$a> F` |
-| Resource class `U` | `Borrow<$a, U>` | `ReadOnlyBorrow<$a, U>` |
+| Resource class `U` | `ExclusiveBorrow<$a, U>` | `Borrow<$a, U>` |
 | Other reference type `U` | `Borrow<$a, U>` | `Borrow<$a, U>` |
 | Struct that contains references | Accessed only by reference; its references are read by projection | Same |
 | Type that contains no references | Its normal value | Same |
 
-A few of these deserve explanation. For a resource struct field, `e.F` is a location with the lifetime `$a`. When `e` is a by-ref, this is exactly what the model already says for fields of structs. For a reference field that isn't a resource, the aliasing rules from [mutability](#mutability) don't apply -- the borrow may be copied, and what can be done with the target is governed by `U`, just as for a `readonly` field of type `U` today. And a struct field that contains references can't be copied out of `e`, since copying it would copy out the references inside it without their lifetime.
+A few of these deserve explanation. For a resource struct field, `e.F` is a location with the lifetime `$a`. When `e` is a by-ref, this is exactly what the model already says for fields of structs. For a reference field that isn't a resource, the result is always a shared borrow, since the aliasing rules from [exclusivity](#exclusivity) only apply to resources. What can be done with the target is governed by `U`, just as for a `readonly` field of type `U` today. And a struct field that contains references can't be copied out of `e`, since copying it would copy out the references inside it without their lifetime.
 
-Element reads through a `Borrow<$a, U[]>` follow the same rules, so the elements of a jagged array are borrows too.
+Element reads through a borrow of an array follow the same rules, so the elements of a jagged array are borrows too.
 
 Note that projection only depends on the type of `e`, not on the kind of member it appears in, so it applies equally in static members and nested types. Also note that projection never changes the lifetime of a location. Array elements are still `$heap` locations, and `ref<$heap> T` is converted to `ref<$a> T` by ordinary covariance.
 
@@ -424,7 +424,7 @@ Consume(rented);                 // error: rented may be loaned
 span[0] = 1;
 ```
 
-The type of `span` is `Span<$local>`, which is valid until the end of the block, so the type system has no problem with `span[0] = 1`. But by that point `Consume` has taken ownership of the rental, and may have already returned the array to the pool. Similarly, a member called through a mutable borrow could reassign a resource field, dropping its old value while a borrow of it is still in scope.
+The type of `span` is `Span<$local>`, which is valid until the end of the block, so the type system has no problem with `span[0] = 1`. But by that point `Consume` has taken ownership of the rental, and may have already returned the array to the pool. Similarly, a member called through an exclusive borrow could reassign a resource field, dropping its old value while a borrow of it is still in scope.
 
 To prevent this we will add a flow analysis called _loan checking_. Like definite assignment, it isn't part of the type system. Rather than rejecting the use of `span`, it rejects the transfer of `rented`, so there is never a point where a borrow of `rented` exists and `rented` no longer owns the array. If the transfer comes first, the borrow is rejected instead, since use after transfer is already disallowed.
 
@@ -432,7 +432,7 @@ Loan checking operates on _places_. A place is an owning variable, `this` in a m
 
 An expression _loans_ a place when it borrows the place, or something reached through it, and stores a value whose lifetime is bounded by that borrow -- in a local, a field, the target of an `out` or `ref` argument, or the method's return value. Borrowing a place means taking a `ref` to it, converting it to a borrow, reading through it by projection, or passing it as a borrowed receiver or argument. Body inference tells us whether a stored value is bounded by the borrow: the borrow constrains the `$ro` or `$cm` that inference chooses for a call, and the call's outputs either use that lifetime or they don't.
 
-A borrow that only flows into calls that don't store anything ends with the call. So `ToUtf8(s, rented.Span)` does not loan `rented`, and neither does `builder[i] = i`. The loaned place is the last place of resource type on the path the borrow was taken through: `rented.Span` loans `rented`, `this._inner.Span` loans `this._inner`, and inside `RentedArray`, reading `_rented` loans `this`. A loan is read-only if the borrow was read-only (`ref readonly`, `in`, `ReadOnlyBorrow`, or a call to a `readonly` member), and mutable otherwise.
+A borrow that only flows into calls that don't store anything ends with the call. So `ToUtf8(s, rented.Span)` does not loan `rented`, and neither does `builder[i] = i`. The loaned place is the last place of resource type on the path the borrow was taken through: `rented.Span` loans `rented`, `this._inner.Span` loans `this._inner`, and inside `RentedArray`, reading `_rented` loans `this`. A loan is shared if the borrow was shared (`ref readonly`, `in`, `Borrow`, or a call to a `readonly` member), and exclusive otherwise.
 
 Note that loans are recorded at the expression that creates them, not inferred later from the types of variables. Covariance can convert a lifetime to a shorter one, so the type of a value doesn't always tell us which place it was borrowed from.
 
@@ -449,21 +449,21 @@ Consume(rented);                 // error: rented may be loaned
 
 A loan lasts until the end of the scope of its place, or until the end of the method for `this` and parameters. Two places _overlap_ when one is the other, or is reached through it. At a point where a place `p` is possibly loaned, the following rules apply to any place that overlaps `p`:
 
-| Operation | `p` has a read-only loan | `p` has a mutable loan |
+| Operation | `p` has a shared loan | `p` has an exclusive loan |
 | --- | --- | --- |
-| Read, or borrow read-only | Allowed | Error |
-| Borrow mutably | Error | Error |
+| Read, or borrow shared | Allowed | Error |
+| Borrow exclusively | Error | Error |
 | Assign, dropping the previous value | Error | Error |
 | Transfer | Error | Error |
 
-Mutable borrows are prohibited even under a read-only loan because a mutable borrow could reassign a resource field, dropping the target of the loan.
+Exclusive borrows are prohibited even under a shared loan because an exclusive borrow could reassign a resource field, dropping the target of the loan.
 
-Since overlap is based on places, different resource fields of the same value don't overlap, and may be borrowed independently, even mutably:
+Since overlap is based on places, different resource fields of the same value don't overlap, and may be borrowed independently, even exclusively:
 
 ```csharp
 struct Buffer : IResource
 {
-    public Span<int> GetSpan() { ... }   // not readonly, so it borrows mutably
+    public Span<int> GetSpan() { ... }   // not readonly, so it borrows exclusively
 }
 
 struct Pair : IResource
@@ -473,7 +473,7 @@ struct Pair : IResource
 
     void Copy()
     {
-        Span<int> a = A.GetSpan();   // mutable loan of this.A
+        Span<int> a = A.GetSpan();   // exclusive loan of this.A
         Span<int> b = B.GetSpan();   // okay: this.B doesn't overlap this.A
         a.CopyTo(b);
         M();                         // error: this overlaps this.A and this.B
@@ -542,20 +542,22 @@ The argument has the following shape. Like the model's, it is a sketch rather th
 
 #### Relationship to the ref safety model
 
-To summarize, ownership adds to the [ref safety model](ref-safety-model.md) without changing it. The model's rules describe the types and locations that exist in C# today, and everything ownership introduces is new. `Borrow<$a, T>` and `ReadOnlyBorrow<$a, T>` are ref structs with a single covariant lifetime parameter, which the model already describes. The field of a resource class is a new kind of location, with a new row in the location table. Borrow projection is a new typing rule, and apart from resource class fields, the lifetimes it produces come from the model's existing covariant conversions. The receivers of resource members, `[BorrowedReceiver]` members, and `Drop` are new cases in the signature translation, whose defaults the model leaves open. Owner lifetimes are just the lifetimes of locations, so the lifetimes in scope remain totally ordered. And loan checking is a separate flow analysis.
+To summarize, ownership adds to the [ref safety model](ref-safety-model.md) without changing it. The model's rules describe the types and locations that exist in C# today, and everything ownership introduces is new. `Borrow<$a, T>` and `ExclusiveBorrow<$a, T>` are ref structs with a single covariant lifetime parameter, which the model already describes. The field of a resource class is a new kind of location, with a new row in the location table. Borrow projection is a new typing rule, and apart from resource class fields, the lifetimes it produces come from the model's existing covariant conversions. The receivers of resource members, `[BorrowedReceiver]` members, and `Drop` are new cases in the signature translation, whose defaults the model leaves open. Owner lifetimes are just the lifetimes of locations, so the lifetimes in scope remain totally ordered. And loan checking is a separate flow analysis.
 
 Notably, the rule that a value returned from an instance member of a resource type can't outlive `this` doesn't need to be stated at all. It falls out of the `ref<$ro>` receiver and borrow projection. The same reasoning covers `out` parameters, static members, and every other way a value can leave a member.
 
-### Mutability
+### Exclusivity
 
 At any point, a resource value permits either:
 
-- one mutable borrow, or
-- any number of read-only borrows.
+- one exclusive borrow, or
+- any number of shared borrows.
 
-These states are mutually exclusive, and are enforced by [loan checking](#loan-checking), which also prevents the owner from being transferred or reassigned while it is borrowed. Note that these rules only apply to resources. Borrows of non-resource values, like the ones produced by [borrow projection](#borrow-projection), just carry a lifetime.
+These states are mutually exclusive, and are enforced by [loan checking](#loan-checking), which also prevents the owner from being transferred or reassigned while it is borrowed. Note that these rules only apply to resources. Borrows of non-resource values, like the ones produced by [borrow projection](#borrow-projection), are always shared and just carry a lifetime.
 
-To accommodate read-only and mutable borrows we also have to adjust the rules for classes themselves. The `readonly` keyword will now be legal for class methods, just like struct methods. It will have the same rules. An ordinary (non-readonly) class instance method will have a `Borrow<this>` receiver. A `readonly` instance member has a `ReadOnlyBorrow<this>` receiver. Importantly, read-only borrows may only call readonly members. Note that this is shallow mutability -- non-resource members may effectively be mutated due to lack of mutability requirements on interior members.
+It's important to note that the difference between the two kinds of borrow is uniqueness, not mutability. Mutability is a complicated topic in C#, with `readonly` only applying to the outer layer of a value. Instead, what matters for ownership is whether a borrow can invalidate a value that someone else is using. An exclusive borrow is the only way to access the value while it exists, which makes it safe to reassign the value's fields -- and, by doing so, drop its resource fields. A shared borrow may coexist with others, so its holder may not reassign the value's fields, or one holder could drop a resource field that another is still using. That restriction is exactly C#'s existing, shallow `readonly`. Neither kind of borrow says anything about the contents of non-resource fields, which may be modified through either one, as governed by their own types.
+
+To accommodate shared borrows we also have to adjust the rules for classes themselves. The `readonly` keyword will now be legal for class methods, just like struct methods. It will have the same rules. An ordinary (non-readonly) class instance method will have an `ExclusiveBorrow<this>` receiver. A `readonly` instance member has a `Borrow<this>` receiver. Importantly, shared borrows may only call readonly members. For structs, the same distinction is spelled `ref` for an exclusive borrow and `ref readonly` for a shared one.
 
 ### Bridging the worlds
 
@@ -579,13 +581,13 @@ class C
 }
 ```
 
-The effect is to change the type of the receiver from the containing type `C`, to the borrow type `Borrow<C>`.  The full formal lifetime would look like,
+The effect is to change the type of the receiver from the containing type `C`, to the borrow type `ExclusiveBorrow<C>`, or `Borrow<C>` for a `readonly` member.  The full formal lifetime would look like,
 
 ```C#
 class C
 {
     [BorrowedReceiver]
-    public static void M1<$ro>(Borrow<$ro, C> @this) { ... }
+    public static void M1<$ro>(ExclusiveBorrow<$ro, C> @this) { ... }
 }
 ```
 
@@ -763,7 +765,7 @@ Note how projection applies here. The indexer's receiver is `ref<$ro> OwnedImmut
 - [ ] Existing APIs. A borrow can't be passed to an existing method that takes `T[]` or another class type. We could extend `[BorrowedReceiver]` to parameters, typing them as `Borrow<$ro, T>`, or `Borrow<$local, T>` when `scoped`. Since a regular reference converts to `Borrow<$heap, T>`, annotating a parameter this way wouldn't break existing callers. The implicit conversion from `T[]` to `Span<T>` would be a good candidate.
 - [ ] Struct fields that contain references. Projection makes these accessible only by reference, so a field of type `ImmutableArray<T>` can't be copied out of a resource. Calling its members would require borrowed receivers on structs.
 - [ ] Generic substitution. Resource types can't be substituted for type parameters, but ref structs can be substituted for type parameters that `allows ref struct`. A similar anti-constraint could allow resources. Generic code would then have to treat the type parameter as a resource -- its values would be transferred rather than copied, dropped at the end of their scope, and have borrowed receivers. If the type argument can be lifetime-bearing, the type parameter would carry a lifetime, just as the [ref safety model](ref-safety-model.md) already describes for `allows ref struct`.
-- [ ] Depth of `readonly`. Projection keeps the shallow `readonly` of C#, so a `readonly` member can return a `Span<T>` over an array field. If read-only borrows should also prevent writes to non-resource contents, projection through a read-only borrow would have to produce read-only results, and `RentedArray` could only expose a `ReadOnlySpan<T>`.
+- [ ] Depth of `readonly`. Projection keeps the shallow `readonly` of C#, so a `readonly` member can return a `Span<T>` over an array field. If shared borrows should also prevent writes to non-resource contents, projection through a shared borrow would have to produce read-only results, and `RentedArray` could only expose a `ReadOnlySpan<T>`.
 - [ ] Loan duration. Loans last until the end of their place's scope. Ending a loan when the variables holding its borrows go out of scope would accept more programs, but loan checking would then need to track which variables hold borrowed values.
 - [ ] Arrays of resources holding borrows. By the same argument as resource classes, the elements of an array of resources could be given the lifetime of the array instead of `$heap`. This would be another new row in the location table.
 - [ ] Non-lexical lifetimes. Ending an owner's lifetime where it is transferred would accept more programs, but it's a larger extension than the others. Body inference in the [ref safety model](ref-safety-model.md) relies on the lifetimes in scope being totally ordered, and a lifetime that ends partway through a block breaks that. Inference would need to choose the longest lifetime no longer than each constraint, rather than simply the shortest constraint, and we'd need a rule that a value is only used within the lifetimes in its type. This wouldn't break existing code, though. Only owners would have such lifetimes, so in a program without resource types the lifetimes remain totally ordered, and the generalized inference chooses the same lifetimes as today.
