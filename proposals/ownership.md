@@ -461,18 +461,25 @@ Mutable borrows are prohibited even under a read-only loan because a mutable bor
 Since overlap is based on places, different resource fields of the same value don't overlap, and may be borrowed independently, even mutably:
 
 ```csharp
+struct Buffer : IResource
+{
+    public Span<int> GetSpan() { ... }   // not readonly, so it borrows mutably
+}
+
 struct Pair : IResource
 {
-    RentedArray A;
-    RentedArray B;
+    Buffer A;
+    Buffer B;
 
     void Copy()
     {
-        Span<int> a = A.Span;    // loans this.A
-        Span<int> b = B.Span;    // okay: this.B doesn't overlap this.A
+        Span<int> a = A.GetSpan();   // mutable loan of this.A
+        Span<int> b = B.GetSpan();   // okay: this.B doesn't overlap this.A
         a.CopyTo(b);
-        M();                     // error: this overlaps this.A and this.B
+        M();                         // error: this overlaps this.A and this.B
     }
+
+    void M() { }
 }
 ```
 
