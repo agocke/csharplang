@@ -118,6 +118,19 @@ In the above, `local.M();` is an error. `r2 = local` did not make a copy or crea
 - The receiver of `Drop` is owned, not borrowed (see [borrow projection](#borrow-projection))
 - Drop implementations should not throw
 
+Note that a variable may be transferred on some paths but not others. For example,
+
+```csharp
+R local = new R();
+if (b)
+{
+    Helper(local);   // transfers local
+}
+local.M();           // error: local may have been transferred
+```
+
+Using a variable after it may have been transferred is an error, so the only question is whether to drop it. In this case `local` should be dropped at the end of its scope only if `b` was false. When this can't be determined statically, the compiler tracks it with a hidden _drop flag_ -- a local that is cleared when ownership is transferred, and checked before calling `Drop`. The same flag decides whether reassigning the variable drops its previous value. Drop flags are only needed for variables that are conditionally transferred, so most variables don't need one.
+
 ### Borrowing references
 
 Now that we've covered owning references we need to outline borrowed references. Borrowing is very important because it makes helper functions and modularity possible. Consider a generic `ReadByte` function that operates on a `File` type. If `ReadByte` were forced to take ownership of the `File`, `ReadByte` could only be called a single time on a given reference — very inconvenient for files more than one byte long.
@@ -423,7 +436,7 @@ A borrow that only flows into calls that don't store anything ends with the call
 
 Note that loans are recorded at the expression that creates them, not inferred later from the types of variables. Covariance can convert a lifetime to a shorter one, so the type of a value doesn't always tell us which place it was borrowed from.
 
-A place is _possibly loaned_ at a point in the method if some path through the method reaches that point after an expression that loans the place. Where paths merge, including along loop back edges, the analysis takes the union:
+A place is _possibly loaned_ at a point in the method if some path through the method reaches that point after an expression that loans the place. The same analysis tracks whether a variable is _possibly transferred_. Where paths merge, including along loop back edges, the analysis takes the union:
 
 ```csharp
 Span<byte> span = default;
@@ -445,6 +458,28 @@ A loan lasts until the end of the scope of its place, or until the end of the me
 
 Mutable borrows are prohibited even under a read-only loan because a mutable borrow could reassign a resource field, dropping the target of the loan.
 
+Since overlap is based on places, different resource fields of the same value don't overlap, and may be borrowed independently, even mutably:
+
+```csharp
+struct Pair : IResource
+{
+    RentedArray A;
+    RentedArray B;
+
+    void Copy()
+    {
+        Span<int> a = A.Span;    // loans this.A
+        Span<int> b = B.Span;    // okay: this.B doesn't overlap this.A
+        a.CopyTo(b);
+        M();                     // error: this overlaps this.A and this.B
+    }
+}
+```
+
+The call to `M` borrows all of `this`, which overlaps both loaned fields. Similarly, a caller of a member that returns a borrow derived from one field sees a loan of the whole receiver, since it can't see which field the borrow came from.
+
+Exceptions also create paths. An exception may be thrown at any point inside a `try` block, so a transfer or loan anywhere in the block is considered possibly done at the start of each `catch` and `finally` block. When an exception leaves the scope of an owning variable, the variable is dropped as usual, using its drop flag if it may have been transferred.
+
 No check is needed when a place leaves scope. Every borrow of the place has a lifetime no longer than its block, so every borrow is out of scope too. Owning variables are dropped in reverse declaration order, since a resource declared after `v` may hold a borrow of `v` and use it in its `Drop`.
 
 Lastly, loan checking is lexical. A loan lasts until the end of its place's scope, even if the values holding the borrow are no longer used. This rejects some safe programs:
@@ -455,6 +490,48 @@ Span<byte> span = rented.Span;
 ToUtf8(s, span);
 Consume(rented);                 // error: rented is loaned, although span is no longer used
 ```
+
+A more interesting case is a borrow that is returned on one path, while the other path needs the owner:
+
+```csharp
+static Borrow<Node> GetOrAdd(ref Map map, int key)
+{
+    if (map.TryGetBorrow(key, out var value))
+    {
+        return value;
+    }
+
+    map.Add(key, new Node());    // error: map may be loaned
+    return map.GetBorrow(key);
+}
+```
+
+`TryGetBorrow` writes a borrow of `map` to `value`, so it loans `map` on both paths, even though the borrow is only used on the path that returns. This is intentionally rejected. Rust's non-lexical lifetimes reject it as well, and only a more precise analysis, like Rust's experimental Polonius, can accept it. The workaround is to check without borrowing first:
+
+```csharp
+static Borrow<Node> GetOrAdd(ref Map map, int key)
+{
+    if (!map.ContainsKey(key))
+    {
+        map.Add(key, new Node());
+    }
+    return map.GetBorrow(key);
+}
+```
+
+#### Safety
+
+Putting these pieces together, the property that ownership is meant to guarantee is:
+
+> In a program that type checks and passes loan checking, whenever a borrow is used -- including a by-ref or span derived from one -- the value it was borrowed from is still owned. It hasn't been transferred, reassigned, or dropped.
+
+The argument has the following shape. Like the model's, it is a sketch rather than a proof, and it doesn't cover `unsafe` code or reflection.
+
+- A borrow of an owner is created with the lifetime of the owner's location, or by projection with the lifetime of the borrow it was projected through. By the model's argument, conversions only shorten that lifetime, and the borrow can't be stored anywhere that outlives it. So every borrow of an owner is out of scope by the end of the owner's scope. For resource classes, this relies on the object only being reachable through its owner and borrows of it.
+- Any borrow that outlives the expression that created it is recorded as a loan of the place it was taken through. Loans are recorded at creation, merged over every path, including exceptional ones, and last until the end of the place's scope. So wherever a borrow may be used, its place is possibly loaned.
+- While a place is possibly loaned, neither it nor any overlapping place can be transferred or reassigned, and it can't be borrowed in a way that could reassign its resource fields. So from the loan to the end of the scope, the place keeps its value, and so do its resource fields.
+- At the end of the scope, every borrow of the place is out of scope too, by the first point, so dropping it is safe. Reverse declaration order means that a resource holding a borrow of another is dropped first, while its borrow is still valid.
+- Each value is dropped at most once. A transferred variable is not dropped, and drop flags settle the cases where it is only transferred on some paths.
 
 #### Relationship to the ref safety model
 
