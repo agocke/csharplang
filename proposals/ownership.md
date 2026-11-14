@@ -284,6 +284,18 @@ We will not add a corresponding rule for the elements of arrays of resources, so
 
 We've already said that all instance members of resource types have a borrowed receiver. Now we can make that precise. The model translates instance methods into static methods with an explicit `this` parameter, and notes that this translation is just a choice of defaults -- safety doesn't depend on it. So we are free to choose new defaults for resource types:
 
+| Member | Type of `this` |
+| --- | --- |
+| Instance member of a resource struct `R` | `ref<$ro> R` |
+| `readonly` instance member of a resource struct `R` | `ref readonly<$ro> R` |
+| Instance member of a resource class `R` | `Borrow<$ro, R>` |
+| `readonly` instance member of a resource class `R` | `ReadOnlyBorrow<$ro, R>` |
+| Constructor of a resource class `R` | `Borrow<$local, R>` |
+| `[BorrowedReceiver]` member of a class `C` | `Borrow<$ro, C>`, or `ReadOnlyBorrow<$ro, C>` if `readonly` |
+| `Drop` of a resource type `R` | `R`, owned |
+
+For example,
+
 ```csharp
 struct R : IResource
 {
@@ -314,7 +326,7 @@ class C : IResource
 }
 ```
 
-`[BorrowedReceiver]` members of ordinary classes are translated the same way as members of resource classes. `Drop` is the exception: its receiver is owned, not borrowed, since it is called at the end of the value's lifetime. If the resource type is lifetime-bearing, `R` stands for `R<$cm>` in these signatures, or `R<$ro>` in constructors, matching the model's translation of ref struct receivers and constructors.
+Note that `Drop` is the exception: its receiver is owned, not borrowed, since it is called at the end of the value's lifetime. If the resource type is lifetime-bearing, `R` stands for `R<$cm>` in these signatures, or `R<$ro>` in constructors, matching the model's translation of ref struct receivers and constructors.
 
 Note the receiver of a resource struct. In an ordinary struct, `this` is implicitly `scoped`: `ref<$local> S`. Resource structs instead get `ref<$ro> R`, as though the member were marked `[UnscopedRef]`. This is what lets a member return values derived from `this` -- at the call site, those values are bounded by the receiver. Constructors are unchanged.
 
